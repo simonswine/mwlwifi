@@ -308,7 +308,7 @@ static void mwl_mac80211_remove_interface(struct ieee80211_hw *hw,
 	mwl_mac80211_remove_vif(priv, vif);
 }
 
-static int mwl_mac80211_config(struct ieee80211_hw *hw,
+static int mwl_mac80211_config(struct ieee80211_hw *hw, int radio_idx,
 			       u32 changed)
 {
 	struct ieee80211_conf *conf = &hw->conf;
@@ -564,7 +564,7 @@ out:
 	return rc;
 }
 
-static int mwl_mac80211_set_rts_threshold(struct ieee80211_hw *hw,
+static int mwl_mac80211_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
 					  u32 value)
 {
 	return mwl_fwcmd_set_rts_threshold(hw, value);
