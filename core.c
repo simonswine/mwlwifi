@@ -738,7 +738,11 @@ static irqreturn_t mwl_isr(int irq, void *dev_id)
 #ifdef timer_setup
 static void timer_routine(struct timer_list *t)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,16,0)
 	struct mwl_priv *priv = from_timer(priv, t, period_timer);
+#else
+	struct mwl_priv *priv = timer_container_of(priv, t, period_timer);
+#endif
 	struct ieee80211_hw *hw = priv->hw;
 #else
 static void timer_routine(unsigned long data)
@@ -975,7 +979,11 @@ static void mwl_wl_deinit(struct mwl_priv *priv)
 {
 	struct ieee80211_hw *hw = priv->hw;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,13,0)
 	del_timer_sync(&priv->period_timer);
+#else
+	timer_shutdown_sync(&priv->period_timer);
+#endif
 
 	if (priv->irq != -1) {
 		free_irq(priv->irq, hw);
