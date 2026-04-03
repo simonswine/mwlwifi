@@ -583,7 +583,11 @@ struct pcie_priv {
 	struct tasklet_struct tx_task;
 	struct tasklet_struct tx_done_task;
 	/* NAPI */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0)
 	struct net_device napi_dev;
+#else
+	struct net_device *napi_dev;
+#endif
 	struct napi_struct napi;
 	struct tasklet_struct rx_task;
 	unsigned int tx_head_room;

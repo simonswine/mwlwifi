@@ -215,9 +215,15 @@ static int pcie_init_8997(struct ieee80211_hw *hw)
 		     (void *)pcie_8997_tx_done_task, (unsigned long)hw);
 	tasklet_disable(&pcie_priv->tx_done_task);
 	spin_lock_init(&pcie_priv->tx_desc_lock);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,15,0)
 	init_dummy_netdev(&pcie_priv->napi_dev);
-	netif_napi_add(&pcie_priv->napi_dev, &pcie_priv->napi,
-		       pcie_8997_poll_napi);
+	netif_napi_add(&pcie_priv->napi_dev, &pcie_priv->napi, pcie_8997_poll_napi);
+#else
+	pcie_priv->napi_dev = alloc_netdev_dummy(0);
+	if (!pcie_priv->napi_dev)
+		return -ENOMEM;
+	netif_napi_add(pcie_priv->napi_dev, &pcie_priv->napi, pcie_8997_poll_napi);
+#endif
 	pcie_priv->txq_limit = PCIE_TX_QUEUE_LIMIT;
 	pcie_priv->txq_wake_threshold = PCIE_TX_WAKE_Q_THRESHOLD;
 	pcie_priv->recv_limit = PCIE_RECEIVE_LIMIT;
@@ -310,8 +316,15 @@ static int pcie_init_8864(struct ieee80211_hw *hw)
 	tasklet_init(&pcie_priv->tx_done_task, (void *)pcie_8864_tx_done_task, (unsigned long)hw);
 	tasklet_disable(&pcie_priv->tx_done_task);
 	spin_lock_init(&pcie_priv->tx_desc_lock);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0)
 	init_dummy_netdev(&pcie_priv->napi_dev);
 	netif_napi_add(&pcie_priv->napi_dev, &pcie_priv->napi, pcie_8864_poll_napi);
+#else
+	pcie_priv->napi_dev = alloc_netdev_dummy(0);
+	if (!pcie_priv->napi_dev)
+		return -ENOMEM;
+	netif_napi_add(pcie_priv->napi_dev, &pcie_priv->napi, pcie_8864_poll_napi);
+#endif
 	pcie_priv->txq_limit = PCIE_TX_QUEUE_LIMIT;
 	pcie_priv->txq_wake_threshold = PCIE_TX_WAKE_Q_THRESHOLD;
 	pcie_priv->recv_limit = PCIE_RECEIVE_LIMIT;
