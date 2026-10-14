@@ -1774,6 +1774,10 @@ int mwl_fwcmd_set_radar_detect(struct ieee80211_hw *hw, u16 action)
 		mutex_unlock(&priv->fwcmd_mutex);
 		return -EIO;
 	}
+	if (pcmd->cmd_hdr.result) {
+		mutex_unlock(&priv->fwcmd_mutex);
+		return -EINVAL;
+	}
 
 	mutex_unlock(&priv->fwcmd_mutex);
 

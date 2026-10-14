@@ -308,6 +308,41 @@ static void mwl_mac80211_remove_interface(struct ieee80211_hw *hw,
 	mwl_mac80211_remove_vif(priv, vif);
 }
 
+static int mwl_mac80211_update_radar(struct ieee80211_hw *hw)
+{
+	struct mwl_priv *priv = hw->priv;
+	struct mwl_vif *mwl_vif;
+	struct ieee80211_vif *vif;
+	u16 action = STOP_DETECT_RADAR;
+	int ret;
+
+	if (hw->conf.radar_enabled &&
+	    hw->conf.chandef.chan->band == NL80211_BAND_5GHZ) {
+		/* No beaconing AP means mac80211 is still performing CAC. */
+		action = CAC_START;
+		spin_lock_bh(&priv->vif_lock);
+		list_for_each_entry(mwl_vif, &priv->vif_list, list) {
+			vif = container_of((void *)mwl_vif,
+					   struct ieee80211_vif, drv_priv);
+			if ((vif->type == NL80211_IFTYPE_AP ||
+			     vif->type == NL80211_IFTYPE_MESH_POINT) &&
+			    vif->bss_conf.enable_beacon) {
+				action = MONITOR_START;
+				break;
+			}
+		}
+		spin_unlock_bh(&priv->vif_lock);
+	}
+
+	wiphy_debug(hw->wiphy, "radar action %u, DFS region %u\n",
+		    action, priv->dfs_region);
+	ret = mwl_fwcmd_set_radar_detect(hw, action);
+	if (ret)
+		wiphy_err(hw->wiphy, "failed to set radar action %u: %d\n",
+			  action, ret);
+	return ret;
+}
+
 static int mwl_mac80211_config(struct ieee80211_hw *hw, int radio_idx,
 			       u32 changed)
 {
@@ -337,12 +372,6 @@ static int mwl_mac80211_config(struct ieee80211_hw *hw, int radio_idx,
 			mwl_fwcmd_set_linkadapt_cs_mode(hw,
 							LINK_CS_STATE_AUTO);
 			rate = mwl_rates_50[0].hw_value;
-
-			if (conf->radar_enabled)
-				mwl_fwcmd_set_radar_detect(hw, MONITOR_START);
-			else
-				mwl_fwcmd_set_radar_detect(hw,
-							   STOP_DETECT_RADAR);
 		}
 
 		rc = mwl_fwcmd_set_rf_channel(hw, conf);
@@ -358,7 +387,14 @@ static int mwl_mac80211_config(struct ieee80211_hw *hw, int radio_idx,
 		if (rc)
 			goto out;
 		rc = mwl_fwcmd_set_cdd(hw);
+		if (rc)
+			goto out;
 	}
+
+	/* Channel changes can reset detection; configure it after tuning. */
+	if (changed & (IEEE80211_CONF_CHANGE_CHANNEL |
+		       IEEE80211_CONF_CHANGE_RADAR))
+		rc = mwl_mac80211_update_radar(hw);
 
 out:
 
@@ -473,8 +509,24 @@ static void mwl_mac80211_bss_info_changed_ap(struct ieee80211_hw *hw,
 		}
 	}
 
-	if (changed & BSS_CHANGED_BEACON_ENABLED)
-		mwl_fwcmd_bss_start(hw, vif, info->enable_beacon);
+	if (changed & BSS_CHANGED_BEACON_ENABLED) {
+		int ret;
+
+		/* Enter in-service monitoring before enabling DFS beacons. */
+		if (info->enable_beacon && hw->conf.radar_enabled) {
+			ret = mwl_mac80211_update_radar(hw);
+			if (ret)
+				return;
+		}
+		ret = mwl_fwcmd_bss_start(hw, vif, info->enable_beacon);
+		if (ret) {
+			wiphy_err(hw->wiphy, "failed to change beacon state: %d\n",
+				  ret);
+			return;
+		}
+		if (!info->enable_beacon && hw->conf.radar_enabled)
+			mwl_mac80211_update_radar(hw);
+	}
 }
 
 static void mwl_mac80211_bss_info_changed(struct ieee80211_hw *hw,
