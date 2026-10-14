@@ -1911,8 +1911,8 @@ static ssize_t mwl_debugfs_fixed_rate_write(struct file *file,
 	}
 
 	ret = sscanf(buf, "%08x", &fixed_rate);
-	if (!ret) {
-		ret = -EIO;
+	if (ret != 1) {
+		ret = -EINVAL;
 		goto err;
 	}
 
