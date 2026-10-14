@@ -287,7 +287,7 @@ static inline int pcie_tx_skb_ndp(struct mwl_priv *priv,
 		skb_get(tx_skb);
 		pcie_tx_prepare_info(priv, tx_ctrl->rate, tx_info);
 		tx_ctrl->flags |= TX_CTRL_TYPE_DATA;
-		ieee80211_tx_status(priv->hw, tx_skb);
+		ieee80211_tx_status_skb(priv->hw, tx_skb);
 	}
 
 	if (++tx_send_head_new >= MAX_NUM_TX_DESC)
@@ -483,7 +483,7 @@ void pcie_tx_done_ndp(struct ieee80211_hw *hw)
 		}
 
 		pcie_tx_prepare_info(priv, 0, tx_info);
-		ieee80211_tx_status(hw, skb);
+		ieee80211_tx_status_skb(hw, skb);
 
 bypass_ack:
 		if (++tx_done_tail >= MAX_TX_RING_DONE_SIZE)
@@ -593,13 +593,13 @@ void pcie_tx_xmit_ndp(struct ieee80211_hw *hw,
 			ack_skb = skb_copy(skb, GFP_ATOMIC);
 			ack_info = IEEE80211_SKB_CB(ack_skb);
 			pcie_tx_prepare_info(priv, 0, ack_info);
-			ieee80211_tx_status(hw, ack_skb);
+			ieee80211_tx_status_skb(hw, ack_skb);
 		}
 
 		pcie_tx_encapsulate_frame(priv, skb, k_conf);
 	} else {
 		tid = qos & 0x7;
-		if (sta && sta->ht_cap.ht_supported && !eapol_frame &&
+		if (sta && sta->deflink.ht_cap.ht_supported && !eapol_frame &&
 		    qos != 0xFFFF) {
 			pcie_tx_count_packet(sta, tid);
 			spin_lock_bh(&priv->stream_lock);

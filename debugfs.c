@@ -550,9 +550,9 @@ static ssize_t mwl_debugfs_vif_read(struct file *file, char __user *ubuf,
 		switch (vif->type) {
 		case NL80211_IFTYPE_AP:
 			len += scnprintf(p + len, size - len, "type: ap\n");
-			memcpy(ssid, vif->bss_conf.ssid,
-			       vif->bss_conf.ssid_len);
-			ssid[vif->bss_conf.ssid_len] = 0;
+			memcpy(ssid, vif->cfg.ssid,
+			       vif->cfg.ssid_len);
+			ssid[vif->cfg.ssid_len] = 0;
 			len += scnprintf(p + len, size - len,
 					 "ssid: %s\n", ssid);
 			len += scnprintf(p + len, size - len,
@@ -574,8 +574,8 @@ static ssize_t mwl_debugfs_vif_read(struct file *file, char __user *ubuf,
 					 "type: unknown\n");
 			break;
 		}
-		if (vif->chanctx_conf) {
-			chan_def = &vif->chanctx_conf->def;
+		if (vif->bss_conf.chanctx_conf) {
+			chan_def = &vif->bss_conf.chanctx_conf->def;
 			len += scnprintf(p + len, size - len,
 					 "channel: %d: width: %d\n",
 					 chan_def->chan->hw_value,
@@ -648,18 +648,18 @@ static ssize_t mwl_debugfs_sta_read(struct file *file, char __user *ubuf,
 			sta_info->wds ? "true" : "false",
 			sta_info->ba_hist.enable ? "enable" : "disable",
 			sta_info->is_amsdu_allowed ? sta_info->amsdu_ctrl.cap : 0 ,
-			sta->ht_cap.ht_supported ? sta->ht_cap.cap : 0,
-			sta->ht_cap.ht_supported ? sta->ht_cap.ampdu_factor : 0,
-			sta->ht_cap.ht_supported ? sta->ht_cap.ampdu_density : 0,
-			sta->ht_cap.ht_supported ? sta->ht_cap.mcs.rx_mask[0] : 0,
-			sta->ht_cap.ht_supported ? sta->ht_cap.mcs.rx_mask[1] : 0,
-			sta->ht_cap.ht_supported ? sta->ht_cap.mcs.rx_mask[2] : 0,
-			sta->ht_cap.ht_supported ? sta->ht_cap.mcs.rx_mask[3] : 0,
-			sta->vht_cap.vht_supported ? sta->vht_cap.cap : 0,
-			sta->vht_cap.vht_supported ? sta->vht_cap.vht_mcs.rx_mcs_map : 0,
-			sta->vht_cap.vht_supported ? sta->vht_cap.vht_mcs.tx_mcs_map : 0,
-			sta->bandwidth,
-			sta->rx_nss,
+			sta->deflink.ht_cap.ht_supported ? sta->deflink.ht_cap.cap : 0,
+			sta->deflink.ht_cap.ht_supported ? sta->deflink.ht_cap.ampdu_factor : 0,
+			sta->deflink.ht_cap.ht_supported ? sta->deflink.ht_cap.ampdu_density : 0,
+			sta->deflink.ht_cap.ht_supported ? sta->deflink.ht_cap.mcs.rx_mask[0] : 0,
+			sta->deflink.ht_cap.ht_supported ? sta->deflink.ht_cap.mcs.rx_mask[1] : 0,
+			sta->deflink.ht_cap.ht_supported ? sta->deflink.ht_cap.mcs.rx_mask[2] : 0,
+			sta->deflink.ht_cap.ht_supported ? sta->deflink.ht_cap.mcs.rx_mask[3] : 0,
+			sta->deflink.vht_cap.vht_supported ? sta->deflink.vht_cap.cap : 0,
+			sta->deflink.vht_cap.vht_supported ? sta->deflink.vht_cap.vht_mcs.rx_mcs_map : 0,
+			sta->deflink.vht_cap.vht_supported ? sta->deflink.vht_cap.vht_mcs.tx_mcs_map : 0,
+			sta->deflink.bandwidth,
+			sta->deflink.rx_nss,
 			sta->tdls,
 			sta->tdls_initiator,
 			sta->wme,
@@ -1210,7 +1210,7 @@ static ssize_t mwl_debugfs_dfs_radar_write(struct file *file,
 	struct mwl_priv *priv = (struct mwl_priv *)file->private_data;
 
 	wiphy_info(priv->hw->wiphy, "simulate radar detected\n");
-	ieee80211_radar_detected(priv->hw);
+	ieee80211_radar_detected(priv->hw, NULL);
 
 	return count;
 }
