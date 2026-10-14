@@ -1988,6 +1988,10 @@ static ssize_t mwl_debugfs_core_dump_read(struct file *file, char __user *ubuf,
 		goto err;
 	}
 	memcpy(cd, buff, sizeof(*cd));
+	if (cd->num_regions > MAX_CORE_REGIONS) {
+		ret = -EINVAL;
+		goto err;
+	}
 
 	len += scnprintf(p + len, size - len, "Major Version : %d\n",
 			 cd->version_major);
