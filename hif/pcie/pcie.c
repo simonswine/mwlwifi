@@ -423,8 +423,18 @@ static void pcie_deinit_8864(struct ieee80211_hw *hw)
 
 	pcie_8864_rx_deinit(hw);
 	pcie_8864_tx_deinit(hw);
+	wiphy_info(hw->wiphy,
+		   "deinit: killing tx_done_task state=0x%lx disable_count=%d\n",
+		   READ_ONCE(pcie_priv->tx_done_task.state),
+		   atomic_read(&pcie_priv->tx_done_task.count));
 	tasklet_kill(&pcie_priv->tx_done_task);
+	wiphy_info(hw->wiphy, "deinit: tx_done_task killed\n");
+	wiphy_info(hw->wiphy,
+		   "deinit: killing tx_task state=0x%lx disable_count=%d\n",
+		   READ_ONCE(pcie_priv->tx_task.state),
+		   atomic_read(&pcie_priv->tx_task.count));
 	tasklet_kill(&pcie_priv->tx_task);
+	wiphy_info(hw->wiphy, "deinit: tx_task killed\n");
 	pcie_reset(hw);
 }
 
