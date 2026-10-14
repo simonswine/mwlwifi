@@ -1849,19 +1849,21 @@ static ssize_t mwl_debugfs_ba_hist_write(struct file *file,
 		if (sta_info) {
 			sta_info->ba_hist.enable = false;
 			kfree(sta_info->ba_hist.ba_stats);
+			sta_info->ba_hist.ba_stats = NULL;
 		}
 	}
 	priv->ba_aid = 0;
 	sta_info = utils_find_sta_by_aid(priv, sta_aid);
 	if (sta_info) {
-		sta_info->ba_hist.enable = true;
-		sta_info->ba_hist.index = 0;
 		size = sizeof(struct mwl_tx_ba_stats) * ACNT_BA_SIZE;
-		sta_info->ba_hist.ba_stats = kmalloc(size, GFP_KERNEL);
-		if (sta_info->ba_hist.ba_stats) {
-			memset(sta_info->ba_hist.ba_stats, 0, size);
-			priv->ba_aid = sta_aid;
+		sta_info->ba_hist.ba_stats = kzalloc(size, GFP_KERNEL);
+		if (!sta_info->ba_hist.ba_stats) {
+			ret = -ENOMEM;
+			goto err;
 		}
+		sta_info->ba_hist.index = 0;
+		sta_info->ba_hist.enable = true;
+		priv->ba_aid = sta_aid;
 		ret = count;
 	} else
 		ret = -EINVAL;
