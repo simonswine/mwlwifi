@@ -279,6 +279,9 @@ static void mwl_reg_notifier(struct wiphy *wiphy,
 	hw = wiphy_to_ieee80211_hw(wiphy);
 	priv = hw->priv;
 
+	/* Firmware-locked power tables still need the regulatory radar type. */
+	priv->dfs_region = request->dfs_region;
+
 	if (priv->forbidden_setting) {
 		if (!priv->regulatory_set) {
 			regulatory_hint(wiphy, priv->fw_alpha2);
@@ -289,8 +292,6 @@ static void mwl_reg_notifier(struct wiphy *wiphy,
 		}
 		return;
 	}
-
-	priv->dfs_region = request->dfs_region;
 
 #ifdef CONFIG_OF
 	if ((priv->chip_type != MWL8997) && (priv->pwr_node)) {
