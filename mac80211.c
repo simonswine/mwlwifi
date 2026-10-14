@@ -987,18 +987,6 @@ static void mwl_mac80211_sw_scan_complete(struct ieee80211_hw *hw,
 	priv->sw_scanning = false;
 }
 
-static void mwl_mac80211_change_chanctx(struct ieee80211_hw *hw,
-				       struct ieee80211_chanctx_conf *ctx,
-				       u32 changed)
-{
-	/* Emulation copies ctx->radar_enabled into hw->conf. */
-	ieee80211_emulate_change_chanctx(hw, ctx, changed);
-
-	/* A radar-only update need not trigger the config callback. */
-	if (changed & IEEE80211_CHANCTX_CHANGE_RADAR)
-		mwl_mac80211_update_radar(hw);
-}
-
 const struct ieee80211_ops mwl_mac80211_ops = {
 	.tx                 = mwl_mac80211_tx,
 	.start              = mwl_mac80211_start,
@@ -1022,6 +1010,6 @@ const struct ieee80211_ops mwl_mac80211_ops = {
 	.wake_tx_queue	    = ieee80211_handle_wake_tx_queue,
 	.add_chanctx        = ieee80211_emulate_add_chanctx,
 	.remove_chanctx     = ieee80211_emulate_remove_chanctx,
-	.change_chanctx     = mwl_mac80211_change_chanctx,
+	.change_chanctx     = ieee80211_emulate_change_chanctx,
 	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
 };
