@@ -1366,8 +1366,10 @@ static ssize_t mwl_debugfs_regrdwr_read(struct file *file, char __user *ubuf,
 	int len = 0, size = PAGE_SIZE;
 	ssize_t ret;
 
-	if (*ppos)
+	if (*ppos) {
+		free_page(page);
 		return len;
+	}
 
 	if (!p)
 		return -ENOMEM;
@@ -1605,8 +1607,10 @@ static ssize_t mwl_debugfs_tx_hist_read(struct file *file, char __user *ubuf,
 	struct mwl_sta *sta_info;
 	ssize_t ret;
 
-	if (priv->chip_type != MWL8964)
+	if (priv->chip_type != MWL8964) {
+		free_page(page);
 		return -EPERM;
+	}
 
 	if (!p)
 		return -ENOMEM;
@@ -1944,11 +1948,15 @@ static ssize_t mwl_debugfs_core_dump_read(struct file *file, char __user *ubuf,
 	u32 address, length;
 	ssize_t ret;
 
-	if (priv->chip_type != MWL8964)
+	if (priv->chip_type != MWL8964) {
+		free_page(page);
 		return -EPERM;
+	}
 
-	if (*ppos)
+	if (*ppos) {
+		free_page(page);
 		return len;
+	}
 
 	if (!p)
 		return -ENOMEM;
@@ -2037,8 +2045,10 @@ static ssize_t mwl_debugfs_core_dump_write(struct file *file,
 	int text_mode;
 	ssize_t ret;
 
-	if (priv->chip_type != MWL8964)
+	if (priv->chip_type != MWL8964) {
+		free_page(addr);
 		return -EPERM;
+	}
 
 	if (!buf)
 		return -ENOMEM;
