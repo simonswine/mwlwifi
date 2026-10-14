@@ -551,9 +551,17 @@ void pcie_tx_xmit_ndp(struct ieee80211_hw *hw,
 
 		if (unlikely(ieee80211_is_action(wh->frame_control) &&
 			     mgmt->u.action.category == WLAN_CATEGORY_BACK &&
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
+			     mgmt->u.action.u.addba_req.action_code ==
+#else
 			     mgmt->u.action.action_code ==
+#endif
 			     WLAN_ACTION_ADDBA_REQ)) {
+			#if LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0)
+			capab = le16_to_cpu(mgmt->u.action.u.addba_req.capab);
+#else
 			capab = le16_to_cpu(mgmt->u.action.addba_req.capab);
+#endif
 			tid = (capab & IEEE80211_ADDBA_PARAM_TID_MASK) >> 2;
 			index = utils_tid_to_ac(tid);
 		}
