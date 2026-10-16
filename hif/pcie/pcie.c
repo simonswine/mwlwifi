@@ -405,15 +405,32 @@ err_mwl_tx_init:
 	return rc;
 }
 
+static void pcie_tasklet_teardown(struct tasklet_struct *t)
+{
+	/* mwl_mac80211_stop() disables the data tasklets; if one was also
+	 * scheduled at that moment (observed with tx_task after AP traffic),
+	 * tasklet_kill() would wait forever for the scheduled bit to clear,
+	 * because a disabled tasklet can never run. Re-enable it so the
+	 * pending run drains, then kill, then restore the disabled state.
+	 */
+	if (atomic_read(&t->count)) {
+		tasklet_enable(t);
+		tasklet_kill(t);
+		tasklet_disable(t);
+	} else {
+		tasklet_kill(t);
+	}
+}
+
 static void pcie_deinit_8997(struct ieee80211_hw *hw)
 {
 	struct mwl_priv *priv = hw->priv;
 	struct pcie_priv *pcie_priv = priv->hif.priv;
 
+	pcie_tasklet_teardown(&pcie_priv->tx_done_task);
+	pcie_tasklet_teardown(&pcie_priv->tx_task);
 	pcie_8997_rx_deinit(hw);
 	pcie_8997_tx_deinit(hw);
-	tasklet_kill(&pcie_priv->tx_done_task);
-	tasklet_kill(&pcie_priv->tx_task);
 	pcie_reset(hw);
 }
 
@@ -422,8 +439,24 @@ static void pcie_deinit_8864(struct ieee80211_hw *hw)
 	struct mwl_priv *priv = hw->priv;
 	struct pcie_priv *pcie_priv = priv->hif.priv;
 
-	/* quiesce device interrupts before tearing down DMA buffers and
-	 * tasklets, so no late A2H interrupt references freed resources
+	/* kill the data tasklets first, while all DMA resources are still
+	 * valid, so a drained run cannot touch freed memory
+	 */
+	wiphy_info(hw->wiphy,
+		   "deinit: killing tx_done_task state=0x%lx disable_count=%d\n",
+		   READ_ONCE(pcie_priv->tx_done_task.state),
+		   atomic_read(&pcie_priv->tx_done_task.count));
+	pcie_tasklet_teardown(&pcie_priv->tx_done_task);
+	wiphy_info(hw->wiphy, "deinit: tx_done_task killed\n");
+	wiphy_info(hw->wiphy,
+		   "deinit: killing tx_task state=0x%lx disable_count=%d\n",
+		   READ_ONCE(pcie_priv->tx_task.state),
+		   atomic_read(&pcie_priv->tx_task.count));
+	pcie_tasklet_teardown(&pcie_priv->tx_task);
+	wiphy_info(hw->wiphy, "deinit: tx_task killed\n");
+
+	/* quiesce device interrupts before tearing down the DMA buffers,
+	 * so no late A2H interrupt references freed resources
 	 */
 	wiphy_debug(hw->wiphy, "deinit: masking A2H interrupts\n");
 	writel(0x00, pcie_priv->iobase1 + MACREG_REG_A2H_INTERRUPT_MASK);
@@ -431,18 +464,6 @@ static void pcie_deinit_8864(struct ieee80211_hw *hw)
 
 	pcie_8864_rx_deinit(hw);
 	pcie_8864_tx_deinit(hw);
-	wiphy_info(hw->wiphy,
-		   "deinit: killing tx_done_task state=0x%lx disable_count=%d\n",
-		   READ_ONCE(pcie_priv->tx_done_task.state),
-		   atomic_read(&pcie_priv->tx_done_task.count));
-	tasklet_kill(&pcie_priv->tx_done_task);
-	wiphy_info(hw->wiphy, "deinit: tx_done_task killed\n");
-	wiphy_info(hw->wiphy,
-		   "deinit: killing tx_task state=0x%lx disable_count=%d\n",
-		   READ_ONCE(pcie_priv->tx_task.state),
-		   atomic_read(&pcie_priv->tx_task.count));
-	tasklet_kill(&pcie_priv->tx_task);
-	wiphy_info(hw->wiphy, "deinit: tx_task killed\n");
 
 	/* Never post ISR_RESET to the running firmware at unload: it has
 	 * been observed to take the endpoint off the bus entirely (PCI
@@ -940,10 +961,10 @@ static void pcie_deinit_ndp(struct ieee80211_hw *hw)
 	struct mwl_priv *priv = hw->priv;
 	struct pcie_priv *pcie_priv = priv->hif.priv;
 
+	pcie_tasklet_teardown(&pcie_priv->rx_task);
+	pcie_tasklet_teardown(&pcie_priv->tx_task);
 	pcie_rx_deinit_ndp(hw);
 	pcie_tx_deinit_ndp(hw);
-	tasklet_kill(&pcie_priv->rx_task);
-	tasklet_kill(&pcie_priv->tx_task);
 	pcie_reset(hw);
 }
 
