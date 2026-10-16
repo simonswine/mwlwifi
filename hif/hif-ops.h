@@ -45,12 +45,14 @@ static inline unsigned int mwl_hif_get_ampdu_num(struct ieee80211_hw *hw)
 	return priv->hif.ops->ampdu_num;
 }
 
-static inline void mwl_hif_reset(struct ieee80211_hw *hw)
+static inline int mwl_hif_reset(struct ieee80211_hw *hw)
 {
 	struct mwl_priv *priv = hw->priv;
 
 	if (priv->hif.ops->reset)
-		priv->hif.ops->reset(hw);
+		return priv->hif.ops->reset(hw);
+
+	return 0;
 }
 
 static inline int mwl_hif_init(struct ieee80211_hw *hw)

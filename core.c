@@ -1091,8 +1091,8 @@ int mwl_init_hw(struct ieee80211_hw *hw, const char *fw_name,
 
 	rc = mwl_init_firmware(priv, fw_name, cal_name, txpwrlmt_name);
 	if (rc) {
-		wiphy_err(hw->wiphy, "fail to initialize firmware\n");
-		return -EIO;
+		wiphy_err(hw->wiphy, "fail to initialize firmware: %d\n", rc);
+		return rc;
 	}
 
 	/* firmware is loaded to H/W, it can be released now */

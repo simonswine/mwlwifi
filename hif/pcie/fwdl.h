@@ -18,7 +18,7 @@
 #ifndef _FWDL_H_
 #define _FWDL_H_
 
-void pcie_reset(struct ieee80211_hw *hw);
+int pcie_reset(struct ieee80211_hw *hw);
 int pcie_download_firmware(struct ieee80211_hw *hw);
 
 #endif /* _FWDL_H_ */

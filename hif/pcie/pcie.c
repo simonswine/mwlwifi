@@ -1777,7 +1777,9 @@ static int pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 err_wl_init:
 
-	pcie_reset(hw);
+	/* Do not touch BAR registers again after an inaccessible-device error. */
+	if (rc != -ENODEV)
+		pcie_reset(hw);
 
 err_alloc_pci_resource:
 

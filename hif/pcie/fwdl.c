@@ -110,19 +110,25 @@ static bool pcie_download_ddr_init(struct mwl_priv *priv)
 	return true;
 }
 
-void pcie_reset(struct ieee80211_hw *hw)
+int pcie_reset(struct ieee80211_hw *hw)
 {
 	struct mwl_priv *priv = hw->priv;
 	struct pcie_priv *pcie_priv = priv->hif.priv;
 	u32 regval;
 
+	wiphy_info(hw->wiphy, "reset: checking adapter register\n");
 	regval = readl(pcie_priv->iobase1 + MACREG_REG_INT_CODE);
+	wiphy_info(hw->wiphy, "reset: INT_CODE=0x%08x\n", regval);
 	if (regval == 0xffffffff) {
-		wiphy_err(priv->hw->wiphy, "adapter does not exist\n");
-		return;
+		wiphy_err(hw->wiphy, "reset: adapter inaccessible, aborting\n");
+		return -ENODEV;
 	}
 
+	wiphy_info(hw->wiphy, "reset: posting firmware reset\n");
 	writel(ISR_RESET, pcie_priv->iobase1 + MACREG_REG_H2A_INTERRUPT_EVENTS);
+	wiphy_info(hw->wiphy, "reset: firmware reset write returned\n");
+
+	return 0;
 }
 
 int pcie_download_firmware(struct ieee80211_hw *hw)
@@ -135,13 +141,26 @@ int pcie_download_firmware(struct ieee80211_hw *hw)
 	u32 int_code = 0;
 	u32 len = 0;
 	u32 fwreadysignature = HOSTCMD_SOFTAP_FWRDY_SIGNATURE;
+	int ret;
 
-	pcie_reset(hw);
+	ret = pcie_reset(hw);
+	if (ret)
+		return ret;
 
 	/* FW before jumping to boot rom, it will enable PCIe transaction retry,
 	 * wait for boot code to stop it.
 	 */
 	usleep_range(FW_CHECK_MSECS * 1000, FW_CHECK_MSECS * 2000);
+
+	wiphy_info(hw->wiphy, "fw download: checking adapter after reset delay\n");
+	int_code = readl(pcie_priv->iobase1 + MACREG_REG_INT_CODE);
+	wiphy_info(hw->wiphy, "fw download: post-reset INT_CODE=0x%08x\n",
+		   int_code);
+	if (int_code == 0xffffffff) {
+		wiphy_err(hw->wiphy,
+			  "fw download: adapter inaccessible after reset, aborting\n");
+		return -ENODEV;
+	}
 
 	if (priv->chip_type == MWL8964) {
 		writel(MACREG_A2HRIC_BIT_MASK_NDP,

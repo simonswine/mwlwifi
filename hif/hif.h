@@ -41,7 +41,7 @@ struct mwl_hif_ops {
 	const char *driver_version;
 	unsigned int tx_head_room;
 	int ampdu_num;
-	void (*reset)(struct ieee80211_hw *hw);
+	int (*reset)(struct ieee80211_hw *hw);
 	int (*init)(struct ieee80211_hw *hw);
 	void (*deinit)(struct ieee80211_hw *hw);
 	int (*get_info)(struct ieee80211_hw *hw, char *buf, size_t size);
