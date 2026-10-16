@@ -17,6 +17,7 @@
 
 #include <linux/module.h>
 #include <linux/etherdevice.h>
+#include <linux/delay.h>
 
 #include "sysadpt.h"
 #include "core.h"
@@ -421,6 +422,13 @@ static void pcie_deinit_8864(struct ieee80211_hw *hw)
 	struct mwl_priv *priv = hw->priv;
 	struct pcie_priv *pcie_priv = priv->hif.priv;
 
+	/* quiesce device interrupts before tearing down DMA buffers and
+	 * tasklets, so no late A2H interrupt references freed resources
+	 */
+	wiphy_debug(hw->wiphy, "deinit: masking A2H interrupts\n");
+	writel(0x00, pcie_priv->iobase1 + MACREG_REG_A2H_INTERRUPT_MASK);
+	writel(0x00, pcie_priv->iobase1 + MACREG_REG_A2H_INTERRUPT_CAUSE);
+
 	pcie_8864_rx_deinit(hw);
 	pcie_8864_tx_deinit(hw);
 	wiphy_info(hw->wiphy,
@@ -435,7 +443,14 @@ static void pcie_deinit_8864(struct ieee80211_hw *hw)
 		   atomic_read(&pcie_priv->tx_task.count));
 	tasklet_kill(&pcie_priv->tx_task);
 	wiphy_info(hw->wiphy, "deinit: tx_task killed\n");
-	pcie_reset(hw);
+
+	/* Never post ISR_RESET to the running firmware at unload: it has
+	 * been observed to take the endpoint off the bus entirely (PCI
+	 * config space reads all ones; the next MMIO access can stall the
+	 * CPU indefinitely, which no software timeout recovers from).
+	 * Leave the firmware running; the next probe detects it through
+	 * SCRATCH2 and skips reset and download.
+	 */
 }
 
 static int pcie_get_info(struct ieee80211_hw *hw, char *buf, size_t size)

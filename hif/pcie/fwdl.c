@@ -18,6 +18,9 @@
  */
 
 #include <linux/io.h>
+#include <linux/pci.h>
+#include <linux/pci_regs.h>
+#include <linux/delay.h>
 
 #include "sysadpt.h"
 #include "core.h"
@@ -110,23 +113,62 @@ static bool pcie_download_ddr_init(struct mwl_priv *priv)
 	return true;
 }
 
+static void pcie_dump_pci_config(struct pcie_priv *pcie_priv)
+{
+	struct mwl_priv *priv = pcie_priv->mwl_priv;
+	struct pci_dev *pdev = pcie_priv->pdev;
+	u16 vendor, device, status, command, lnkctl;
+	int pos;
+
+	if (pci_read_config_word(pdev, PCI_VENDOR_ID, &vendor) ||
+	    pci_read_config_word(pdev, PCI_DEVICE_ID, &device) ||
+	    pci_read_config_word(pdev, PCI_STATUS, &status) ||
+	    pci_read_config_word(pdev, PCI_COMMAND, &command)) {
+		wiphy_err(priv->hw->wiphy,
+			  "reset: PCI config read failed\n");
+		return;
+	}
+
+	wiphy_info(priv->hw->wiphy,
+		   "reset: PCI config vendor=0x%04x device=0x%04x status=0x%04x command=0x%04x\n",
+		   vendor, device, status, command);
+
+	if (vendor == 0xffff) {
+		wiphy_err(priv->hw->wiphy,
+			  "reset: PCI config space reads all ones; endpoint or link is down\n");
+		return;
+	}
+
+	pos = pci_find_capability(pdev, PCI_CAP_ID_EXP);
+	if (pos) {
+		if (!pci_read_config_word(pdev, pos + PCI_EXP_LNKCTL, &lnkctl))
+			wiphy_info(priv->hw->wiphy,
+				   "reset: PCI express link control=0x%04x\n",
+				   lnkctl);
+	} else {
+		wiphy_info(priv->hw->wiphy,
+			   "reset: no PCIe capability found\n");
+	}
+}
+
 int pcie_reset(struct ieee80211_hw *hw)
 {
 	struct mwl_priv *priv = hw->priv;
 	struct pcie_priv *pcie_priv = priv->hif.priv;
 	u32 regval;
 
-	wiphy_info(hw->wiphy, "reset: checking adapter register\n");
+	wiphy_debug(hw->wiphy, "reset: checking adapter register\n");
 	regval = readl(pcie_priv->iobase1 + MACREG_REG_INT_CODE);
-	wiphy_info(hw->wiphy, "reset: INT_CODE=0x%08x\n", regval);
+	wiphy_debug(hw->wiphy, "reset: INT_CODE=0x%08x\n", regval);
 	if (regval == 0xffffffff) {
 		wiphy_err(hw->wiphy, "reset: adapter inaccessible, aborting\n");
+		pcie_dump_pci_config(pcie_priv);
 		return -ENODEV;
 	}
 
-	wiphy_info(hw->wiphy, "reset: posting firmware reset\n");
+	wiphy_debug(hw->wiphy, "reset: posting firmware reset\n");
 	writel(ISR_RESET, pcie_priv->iobase1 + MACREG_REG_H2A_INTERRUPT_EVENTS);
-	wiphy_info(hw->wiphy, "reset: firmware reset write returned\n");
+	wiphy_debug(hw->wiphy, "reset: firmware reset write returned\n");
 
 	return 0;
 }
@@ -141,25 +183,60 @@ int pcie_download_firmware(struct ieee80211_hw *hw)
 	u32 int_code = 0;
 	u32 len = 0;
 	u32 fwreadysignature = HOSTCMD_SOFTAP_FWRDY_SIGNATURE;
+	u32 scratch2;
 	int ret;
 
-	ret = pcie_reset(hw);
-	if (ret)
-		return ret;
-
-	/* FW before jumping to boot rom, it will enable PCIe transaction retry,
-	 * wait for boot code to stop it.
+	/* state diagnostics before any write; SCRATCH2 (0xc40) is the
+	 * bootrom download-request register, C1C the doorbell status
 	 */
-	usleep_range(FW_CHECK_MSECS * 1000, FW_CHECK_MSECS * 2000);
-
-	wiphy_info(hw->wiphy, "fw download: checking adapter after reset delay\n");
 	int_code = readl(pcie_priv->iobase1 + MACREG_REG_INT_CODE);
-	wiphy_info(hw->wiphy, "fw download: post-reset INT_CODE=0x%08x\n",
-		   int_code);
 	if (int_code == 0xffffffff) {
 		wiphy_err(hw->wiphy,
-			  "fw download: adapter inaccessible after reset, aborting\n");
+			  "fw download: adapter inaccessible, aborting\n");
+		pcie_dump_pci_config(pcie_priv);
 		return -ENODEV;
+	}
+	scratch2 = readl(pcie_priv->iobase1 + 0xc40);
+	wiphy_debug(hw->wiphy,
+		    "fw download: pre-reset INT_CODE=0x%08x SCRATCH2=0x%08x\n",
+		    int_code, scratch2);
+
+	/* SCRATCH2 (0xc40) discriminates the device state: the bootrom
+	 * requests its first download chunk there (observed 0x10 at
+	 * cold-boot probe), while a firmware left running by a previous
+	 * driver instance keeps it at 0. Posting ISR_RESET to the running
+	 * firmware has been observed to take the endpoint off the bus
+	 * entirely (config space reads all ones), so in that case keep the
+	 * firmware and skip the download.
+	 */
+	if (scratch2 == 0) {
+		wiphy_info(hw->wiphy,
+			   "fw download: firmware already running, skipping reset and download\n");
+	} else {
+		ret = pcie_reset(hw);
+		if (ret)
+			return ret;
+
+		/* FW before jumping to boot rom, it will enable PCIe transaction
+		 * retry, wait for boot code to stop it.
+		 */
+		usleep_range(FW_CHECK_MSECS * 1000, FW_CHECK_MSECS * 2000);
+
+		wiphy_debug(hw->wiphy,
+			    "fw download: checking adapter after reset delay\n");
+		int_code = readl(pcie_priv->iobase1 + MACREG_REG_INT_CODE);
+		wiphy_debug(hw->wiphy,
+			    "fw download: post-reset INT_CODE=0x%08x\n",
+			    int_code);
+		if (int_code == 0xffffffff) {
+			wiphy_err(hw->wiphy,
+				  "fw download: adapter inaccessible after reset, aborting\n");
+			pcie_dump_pci_config(pcie_priv);
+			return -ENODEV;
+		}
+		scratch2 = readl(pcie_priv->iobase1 + 0xc40);
+		wiphy_debug(hw->wiphy,
+			    "fw download: post-reset SCRATCH2=0x%08x\n", scratch2);
 	}
 
 	if (priv->chip_type == MWL8964) {
@@ -181,6 +258,12 @@ int pcie_download_firmware(struct ieee80211_hw *hw)
 		       MACREG_REG_A2H_INTERRUPT_STATUS_MASK);
 	}
 
+	/* firmware kept running: skip the download and initialize over
+	 * the existing firmware, which answers the hostcmd sequence
+	 */
+	if (scratch2 == 0)
+		return 0;
+
 	/* this routine interacts with SC2 bootrom to download firmware binary
 	 * to the device. After DMA'd to SC2, the firmware could be deflated to
 	 * reside on its respective blocks such as ITCM, DTCM, SQRAM,
@@ -192,9 +275,18 @@ int pcie_download_firmware(struct ieee80211_hw *hw)
 		/* Disable PFU before FWDL */
 		writel(0x100, pcie_priv->iobase1 + 0xE0E4);
 
-	/* make sure SCRATCH2 C40 is clear, in case we are too quick */
-	while (readl(pcie_priv->iobase1 + 0xc40) == 0)
-		cond_resched();
+	/* make sure SCRATCH2 C40 is clear, in case we are too quick;
+	 * bounded and sleepable so a stuck device cannot wedge the CPU
+	 */
+	curr_iteration = 1000;
+	while (readl(pcie_priv->iobase1 + 0xc40) == 0) {
+		if (!curr_iteration--) {
+			wiphy_err(hw->wiphy,
+				  "fw download: SCRATCH2 never requested data\n");
+			return -EIO;
+		}
+		usleep_range(1000, 2000);
+	}
 
 	if (priv->chip_type == MWL8964) {
 		if (!pcie_download_ddr_init(priv)) {
