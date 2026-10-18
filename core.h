@@ -206,6 +206,14 @@ struct txpwrlmt_cfg_data {
 	u32 len; /* Actual size of data in buf[] */
 };
 
+enum mwl_csa_state {
+	MWL_CSA_IDLE,
+	MWL_CSA_PREPARED,
+	MWL_CSA_PENDING,
+	MWL_CSA_COMPLETING,
+	MWL_CSA_RECOVERING,
+};
+
 struct mwl_priv {
 	struct ieee80211_hw *hw;
 	struct device *dev;
@@ -324,8 +332,28 @@ struct mwl_priv {
 	struct work_struct wds_check_handle;
 	u8 wds_check_sta[ETH_ALEN];
 
+	/* Native single-channel context; serialized by mac80211's wiphy lock. */
+	struct ieee80211_chanctx_conf *chanctx;
+	struct ieee80211_conf radio_conf;
+	bool radio_conf_valid;
+	bool dfs_monitoring;
+
 	bool dfs_test;
 	bool csa_active;
+	bool csa_faulted; /* Quiesced until explicit driver/firmware recovery. */
+	enum mwl_csa_state csa_state;
+	struct ieee80211_channel_switch csa_request;
+	struct ieee80211_chanctx_conf *csa_old_ctx;
+	u32 csa_expected;
+	u32 csa_prepared;
+	u32 csa_ready;
+	u32 csa_posted;
+	u32 csa_bss_stopped;
+	u32 csa_generation;
+	u32 csa_event_generation;
+	unsigned long csa_timeout_jiffies;
+	unsigned long csa_deadline;
+	struct delayed_work csa_timeout_work;
 	struct work_struct chnl_switch_handle;
 	enum nl80211_dfs_regions dfs_region;
 	u16 dfs_chirp_count_min;
@@ -396,6 +424,7 @@ struct beacon_info {
 
 struct mwl_vif {
 	struct list_head list;
+	struct ieee80211_chanctx_conf *chanctx;
 	enum nl80211_iftype type;
 	int macid;       /* Firmware macid for this vif.  */
 	u16 seqno;       /* Non AMPDU sequence number assigned by driver.  */
@@ -492,6 +521,16 @@ struct mwl_sta {
 	u8 rx_signal;
 };
 
+/* hw->conf.chandef is not the operating channel with native contexts. */
+static inline struct ieee80211_conf *mwl_radio_conf(struct ieee80211_hw *hw)
+{
+	struct mwl_priv *priv = hw->priv;
+
+	/* Retain the last channel for in-flight RX/TX during teardown. */
+	return READ_ONCE(priv->radio_conf.chandef.chan) ?
+		&priv->radio_conf : &hw->conf;
+}
+
 static inline struct mwl_vif *mwl_dev_get_vif(const struct ieee80211_vif *vif)
 {
 	return (struct mwl_vif *)&vif->drv_priv;
@@ -516,6 +555,9 @@ int mwl_init_hw(struct ieee80211_hw *hw, const char *fw_name,
 void mwl_deinit_hw(struct ieee80211_hw *hw);
 
 /* Defined in mac80211.c. */
+void mwl_csa_event(struct ieee80211_hw *hw);
+void mwl_csa_timeout(struct work_struct *work);
+void mwl_queue_csa_event(struct ieee80211_hw *hw);
 extern const struct ieee80211_ops mwl_mac80211_ops;
 
 #endif /* _CORE_H_ */

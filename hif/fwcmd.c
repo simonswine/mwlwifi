@@ -1742,7 +1742,12 @@ int mwl_fwcmd_set_radar_detect(struct ieee80211_hw *hw, u16 action)
 	struct mwl_priv *priv = hw->priv;
 	struct hostcmd_cmd_802_11h_detect_radar *pcmd;
 	u16 radar_type = RADAR_TYPE_CODE_0;
-	u8 channel = hw->conf.chandef.chan->hw_value;
+	struct ieee80211_channel *chan = mwl_radio_conf(hw)->chandef.chan;
+	u8 channel;
+
+	if (!chan)
+		return -EINVAL;
+	channel = chan->hw_value;
 
 	pcmd = (struct hostcmd_cmd_802_11h_detect_radar *)&priv->pcmd_buf[0];
 
@@ -1771,10 +1776,14 @@ int mwl_fwcmd_set_radar_detect(struct ieee80211_hw *hw, u16 action)
 	pcmd->pri_min_num = cpu_to_le16(priv->dfs_min_pri_count);
 
 	if (mwl_hif_exec_cmd(hw, HOSTCMD_CMD_802_11H_DETECT_RADAR)) {
+		wiphy_err(hw->wiphy, "DFS command action %u transport failed\n",
+			  action);
 		mutex_unlock(&priv->fwcmd_mutex);
 		return -EIO;
 	}
 	if (pcmd->cmd_hdr.result) {
+		wiphy_err(hw->wiphy, "DFS command action %u firmware result %u\n",
+			  action, le16_to_cpu(pcmd->cmd_hdr.result));
 		mutex_unlock(&priv->fwcmd_mutex);
 		return -EINVAL;
 	}
@@ -2161,7 +2170,8 @@ int mwl_fwcmd_set_new_stn_add(struct ieee80211_hw *hw,
 		pcmd->if_type = cpu_to_le16(1);
 	ether_addr_copy(pcmd->mac_addr, sta->addr);
 
-	if (hw->conf.chandef.chan->band == NL80211_BAND_2GHZ)
+	if (mwl_radio_conf(hw)->chandef.chan &&
+	    mwl_radio_conf(hw)->chandef.chan->band == NL80211_BAND_2GHZ)
 		rates = sta->deflink.supp_rates[NL80211_BAND_2GHZ];
 	else
 		rates = sta->deflink.supp_rates[NL80211_BAND_5GHZ] << 5;
@@ -2248,7 +2258,8 @@ int mwl_fwcmd_set_new_stn_add_sc4(struct ieee80211_hw *hw,
 	pcmd->stn_id = cpu_to_le16(sta_info->stnid);
 	ether_addr_copy(pcmd->mac_addr, sta->addr);
 
-	if (hw->conf.chandef.chan->band == NL80211_BAND_2GHZ)
+	if (mwl_radio_conf(hw)->chandef.chan &&
+	    mwl_radio_conf(hw)->chandef.chan->band == NL80211_BAND_2GHZ)
 		rates = sta->deflink.supp_rates[NL80211_BAND_2GHZ];
 	else
 		rates = sta->deflink.supp_rates[NL80211_BAND_5GHZ] << 5;
@@ -2450,9 +2461,9 @@ int mwl_fwcmd_set_switch_channel(struct ieee80211_hw *hw,
 	struct ieee80211_channel *channel = chandef->chan;
 	u32 chnl_flags, freq_band, chnl_width, act_primary, sec_chnl_offset;
 
-	if (priv->csa_active)
-		return 0;
-
+	/* Switch lifecycle and duplicate detection belong to mac80211.c. */
+	if (!channel)
+		return -EINVAL;
 	if (channel->band == NL80211_BAND_2GHZ)
 		freq_band = FREQ_BAND_2DOT4GHZ;
 	else if (channel->band == NL80211_BAND_5GHZ)
@@ -2514,7 +2525,12 @@ int mwl_fwcmd_set_switch_channel(struct ieee80211_hw *hw,
 		return -EIO;
 	}
 
-	priv->csa_active = true;
+	if (pcmd->cmd_hdr.result) {
+		wiphy_err(hw->wiphy, "CSA firmware result %u\n",
+			  le16_to_cpu(pcmd->cmd_hdr.result));
+		mutex_unlock(&priv->fwcmd_mutex);
+		return -EINVAL;
+	}
 
 	mutex_unlock(&priv->fwcmd_mutex);
 
@@ -3886,9 +3902,11 @@ int mwl_fwcmd_mcast_cts(struct ieee80211_hw *hw, u8 enable)
 void mwl_fwcmd_get_survey(struct ieee80211_hw *hw, int idx)
 {
 	struct mwl_priv *priv = hw->priv;
-	struct ieee80211_conf *conf = &hw->conf;
+	struct ieee80211_conf *conf = mwl_radio_conf(hw);
 	struct mwl_survey_info *survey_info;
 
+	if (!conf->chandef.chan)
+		return;
 	if (idx)
 		survey_info = &priv->survey_info[idx - 1];
 	else

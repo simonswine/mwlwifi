@@ -705,28 +705,10 @@ static void mwl_chnl_switch_event(struct work_struct *work)
 {
 	struct mwl_priv *priv =
 		container_of(work, struct mwl_priv, chnl_switch_handle);
-	struct mwl_vif *mwl_vif;
-	struct ieee80211_vif *vif;
 
-	if (!priv->csa_active) {
-		wiphy_err(priv->hw->wiphy,
-			  "csa is not active (got channel switch event)\n");
-		return;
-	}
-
-	spin_lock_bh(&priv->vif_lock);
-	list_for_each_entry(mwl_vif, &priv->vif_list, list) {
-		vif = container_of((void *)mwl_vif, struct ieee80211_vif,
-				   drv_priv);
-
-		if (vif->bss_conf.csa_active)
-			ieee80211_csa_finish(vif, 0);
-	}
-	spin_unlock_bh(&priv->vif_lock);
-
-	wiphy_info(priv->hw->wiphy, "channel switch is done\n");
-
-	priv->csa_active = false;
+	wiphy_lock(priv->hw->wiphy);
+	mwl_csa_event(priv->hw);
+	wiphy_unlock(priv->hw->wiphy);
 }
 
 static irqreturn_t mwl_isr(int irq, void *dev_id)
@@ -835,6 +817,7 @@ static int mwl_wl_init(struct mwl_priv *priv)
 	INIT_WORK(&priv->account_handle, mwl_account_handle);
 	INIT_WORK(&priv->wds_check_handle, mwl_wds_check_handle);
 	INIT_WORK(&priv->chnl_switch_handle, mwl_chnl_switch_event);
+	INIT_DELAYED_WORK(&priv->csa_timeout_work, mwl_csa_timeout);
 
 	mutex_init(&priv->fwcmd_mutex);
 	spin_lock_init(&priv->vif_lock);
@@ -995,6 +978,7 @@ static void mwl_wl_deinit(struct mwl_priv *priv)
 		kfree(hw->wiphy->addresses);
 	ieee80211_unregister_hw(hw);
 	mwl_thermal_unregister(priv);
+	cancel_delayed_work_sync(&priv->csa_timeout_work);
 	cancel_work_sync(&priv->chnl_switch_handle);
 	cancel_work_sync(&priv->account_handle);
 	cancel_work_sync(&priv->wds_check_handle);

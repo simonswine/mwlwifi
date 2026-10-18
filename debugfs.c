@@ -1187,6 +1187,20 @@ static ssize_t mwl_debugfs_dfs_radar_read(struct file *file, char __user *ubuf,
 	len += scnprintf(p + len, size - len,
 			 "dfs_region: %d\n", priv->dfs_region);
 	len += scnprintf(p + len, size - len,
+			 "native_context: %u\nradio_conf_valid: %u\n"
+			 "radio_radar_enabled: %u\ndfs_monitoring: %u\n",
+			 !!READ_ONCE(priv->chanctx),
+			 READ_ONCE(priv->radio_conf_valid),
+			 READ_ONCE(priv->radio_conf.radar_enabled),
+			 READ_ONCE(priv->dfs_monitoring));
+	len += scnprintf(p + len, size - len,
+			 "csa_state: %u\ncsa_generation: %u\ncsa_faulted: %u\n"
+			 "csa_expected: 0x%x\ncsa_ready: 0x%x\ncsa_posted: 0x%x\n",
+			 READ_ONCE(priv->csa_state), READ_ONCE(priv->csa_generation),
+			 READ_ONCE(priv->csa_faulted),
+			 READ_ONCE(priv->csa_expected), READ_ONCE(priv->csa_ready),
+			 READ_ONCE(priv->csa_posted));
+	len += scnprintf(p + len, size - len,
 			 "chirp_count_min: %d\n", priv->dfs_chirp_count_min);
 	len += scnprintf(p + len, size - len, "chirp_time_interval: %d\n",
 			 priv->dfs_chirp_time_interval);

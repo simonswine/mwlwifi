@@ -596,7 +596,7 @@ static irqreturn_t pcie_isr_8864(struct ieee80211_hw *hw)
 		}
 
 		if (int_status & MACREG_A2HRIC_BIT_CHAN_SWITCH)
-			ieee80211_queue_work(hw, &priv->chnl_switch_handle);
+			mwl_queue_csa_event(hw);
 
 		if (int_status & MACREG_A2HRIC_BIT_TX_WATCHDOG)
 			ieee80211_queue_work(hw, &priv->watchdog_ba_handle);
@@ -638,7 +638,7 @@ static irqreturn_t pcie_isr_8997(struct ieee80211_hw *hw)
 		}
 
 		if (int_status & MACREG_A2HRIC_BIT_CHAN_SWITCH)
-			ieee80211_queue_work(hw, &priv->chnl_switch_handle);
+			mwl_queue_csa_event(hw);
 
 		if (int_status & MACREG_A2HRIC_BA_WATCHDOG)
 			ieee80211_queue_work(hw, &priv->watchdog_ba_handle);
@@ -1116,7 +1116,7 @@ static irqreturn_t pcie_isr_ndp(struct ieee80211_hw *hw)
 		}
 
 		if (int_status & MACREG_A2HRIC_NEWDP_CHANNEL_SWITCH)
-			ieee80211_queue_work(hw, &priv->chnl_switch_handle);
+			mwl_queue_csa_event(hw);
 	}
 
 	return IRQ_HANDLED;

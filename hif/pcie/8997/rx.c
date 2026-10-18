@@ -392,6 +392,7 @@ int pcie_8997_poll_napi(struct napi_struct *napi, int budget)
 	struct sk_buff *monitor_skb;
 	int pkt_len;
 	struct ieee80211_rx_status *status;
+	struct ieee80211_channel *channel;
 	struct ieee80211_hdr *wh;
 	u8 *_data;
 	u8 *qc;
@@ -421,8 +422,10 @@ int pcie_8997_poll_napi(struct napi_struct *napi, int budget)
 			goto out;
 		}
 
-		if (unlikely(curr_hndl->pdesc->channel !=
-		    hw->conf.chandef.chan->hw_value)) {
+		/* RX can run before the first native context is configured. */
+		channel = READ_ONCE(priv->radio_conf.chandef.chan);
+		if (unlikely(!READ_ONCE(priv->radio_conf_valid) || !channel ||
+		    curr_hndl->pdesc->channel != channel->hw_value)) {
 			dev_kfree_skb_any(prx_skb);
 			goto out;
 		}

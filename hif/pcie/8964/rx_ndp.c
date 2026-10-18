@@ -209,9 +209,9 @@ static void pcie_rx_status_ndp(struct mwl_priv *priv,
 			       sta_info->rx_rate_mcs,
 			       status);
 	status->signal = -sta_info->rx_signal;
-	status->band = priv->hw->conf.chandef.chan->band;
+	status->band = mwl_radio_conf(priv->hw)->chandef.chan->band;
 	status->freq = ieee80211_channel_to_frequency(
-		priv->hw->conf.chandef.chan->hw_value, status->band);
+		mwl_radio_conf(priv->hw)->chandef.chan->hw_value, status->band);
 }
 
 static inline void pcie_rx_process_fast_data(struct mwl_priv *priv,
@@ -344,9 +344,9 @@ static inline void pcie_rx_process_slow_data(struct mwl_priv *priv,
 	status = IEEE80211_SKB_RXCB(skb);
 	memset(status, 0, sizeof(*status));
 	status->signal = -signal;
-	status->band = priv->hw->conf.chandef.chan->band;
+	status->band = mwl_radio_conf(priv->hw)->chandef.chan->band;
 	status->freq = ieee80211_channel_to_frequency(
-		priv->hw->conf.chandef.chan->hw_value, status->band);
+		mwl_radio_conf(priv->hw)->chandef.chan->hw_value, status->band);
 
 	if (bad_mic)
 		status->flag |= RX_FLAG_MMIC_ERROR;
@@ -524,6 +524,13 @@ recheck:
 				 le32_to_cpu(prx_desc->data),
 				 desc->rx_buf_size,
 				 DMA_FROM_DEVICE);
+
+		/* Firmware may deliver stale RX before any context is tuned. */
+		if (unlikely(!READ_ONCE(priv->radio_conf_valid) ||
+		    !READ_ONCE(priv->radio_conf.chandef.chan))) {
+			dev_kfree_skb_any(psk_buff);
+			goto out;
+		}
 
 		bad_mic = false;
 		ctrl = le32_to_cpu(prx_ring_done->ctrl);

@@ -16,6 +16,7 @@
 /* Description:  This file implements mac80211 related functions. */
 
 #include <linux/etherdevice.h>
+#include <linux/math64.h>
 
 #include "sysadpt.h"
 #include "core.h"
@@ -103,10 +104,16 @@ static void mwl_mac80211_tx(struct ieee80211_hw *hw,
 	mwl_hif_tx_xmit(hw, control, skb);
 }
 
+static void mwl_csa_reset(struct ieee80211_hw *hw);
+static void mwl_csa_fail(struct ieee80211_hw *hw, const char *reason);
+
 static int mwl_mac80211_start(struct ieee80211_hw *hw)
 {
 	struct mwl_priv *priv = hw->priv;
 	int rc;
+
+	if (priv->csa_faulted)
+		return -EIO;
 
 	/* Enable TX and RX tasklets. */
 	mwl_hif_enable_data_tasks(hw);
@@ -161,6 +168,9 @@ fwcmd_fail:
 
 static void mwl_mac80211_stop(struct ieee80211_hw *hw, bool suspend)
 {
+	struct mwl_priv *priv = hw->priv;
+
+	mwl_csa_reset(hw);
 	mwl_fwcmd_radio_disable(hw);
 
 	ieee80211_stop_queues(hw);
@@ -173,6 +183,9 @@ static void mwl_mac80211_stop(struct ieee80211_hw *hw, bool suspend)
 
 	/* Return all skbs to mac80211 */
 	mwl_hif_tx_return_pkts(hw);
+	priv->chanctx = NULL;
+	priv->radio_conf_valid = false;
+	priv->dfs_monitoring = false;
 }
 
 static int mwl_mac80211_add_interface(struct ieee80211_hw *hw,
@@ -313,13 +326,18 @@ static int mwl_mac80211_update_radar(struct ieee80211_hw *hw)
 	struct mwl_priv *priv = hw->priv;
 	struct mwl_vif *mwl_vif;
 	struct ieee80211_vif *vif;
+	struct ieee80211_conf *conf = mwl_radio_conf(hw);
 	u16 action = STOP_DETECT_RADAR;
 	int ret;
 
-	if (hw->conf.radar_enabled &&
-	    hw->conf.chandef.chan->band == NL80211_BAND_5GHZ) {
-		/* No beaconing AP means mac80211 is still performing CAC. */
-		action = CAC_START;
+	if (conf->radar_enabled && conf->chandef.chan &&
+	    conf->chandef.chan->band == NL80211_BAND_5GHZ) {
+		/*
+		 * New DFS contexts start in CAC mode. Once beaconing starts,
+		 * keep in-service monitoring until the radar requirement or
+		 * context is removed, including temporary beacon pauses.
+		 */
+		action = priv->dfs_monitoring ? MONITOR_START : CAC_START;
 		spin_lock_bh(&priv->vif_lock);
 		list_for_each_entry(mwl_vif, &priv->vif_list, list) {
 			vif = container_of((void *)mwl_vif,
@@ -334,22 +352,26 @@ static int mwl_mac80211_update_radar(struct ieee80211_hw *hw)
 		spin_unlock_bh(&priv->vif_lock);
 	}
 
-	wiphy_debug(hw->wiphy, "radar action %u, DFS region %u\n",
-		    action, priv->dfs_region);
+	wiphy_debug(hw->wiphy, "DFS action %u region %u freq %u\n",
+		    action, priv->dfs_region,
+		    conf->chandef.chan ? conf->chandef.chan->center_freq : 0);
 	ret = mwl_fwcmd_set_radar_detect(hw, action);
 	if (ret)
 		wiphy_err(hw->wiphy, "failed to set radar action %u: %d\n",
 			  action, ret);
+	if (!ret && action == MONITOR_START)
+		priv->dfs_monitoring = true;
 	return ret;
 }
 
-static int mwl_mac80211_config(struct ieee80211_hw *hw, int radio_idx,
-			       u32 changed)
+static int mwl_configure_radio(struct ieee80211_hw *hw,
+			       struct ieee80211_conf *conf, u32 changed)
 {
-	struct ieee80211_conf *conf = &hw->conf;
+	struct mwl_priv *priv = hw->priv;
 	int rc;
 
-	wiphy_debug(hw->wiphy, "change: 0x%x\n", changed);
+	if (priv->csa_faulted && !(conf->flags & IEEE80211_CONF_IDLE))
+		return -EIO;
 
 	if (conf->flags & IEEE80211_CONF_IDLE)
 		rc = mwl_fwcmd_radio_disable(hw);
@@ -362,17 +384,31 @@ static int mwl_mac80211_config(struct ieee80211_hw *hw, int radio_idx,
 	if (changed & IEEE80211_CONF_CHANGE_CHANNEL) {
 		int rate = 0;
 
+		if (!conf->chandef.chan) {
+			rc = -EINVAL;
+			goto out;
+		}
+
 		if (conf->chandef.chan->band == NL80211_BAND_2GHZ) {
-			mwl_fwcmd_set_apmode(hw, AP_MODE_2_4GHZ_11AC_MIXED);
-			mwl_fwcmd_set_linkadapt_cs_mode(hw,
-							LINK_CS_STATE_CONSERV);
+			rc = mwl_fwcmd_set_apmode(hw, AP_MODE_2_4GHZ_11AC_MIXED);
+			if (rc)
+				goto out;
+			rc = mwl_fwcmd_set_linkadapt_cs_mode(hw,
+							   LINK_CS_STATE_CONSERV);
 			rate = mwl_rates_24[0].hw_value;
 		} else if (conf->chandef.chan->band == NL80211_BAND_5GHZ) {
-			mwl_fwcmd_set_apmode(hw, AP_MODE_11AC);
-			mwl_fwcmd_set_linkadapt_cs_mode(hw,
-							LINK_CS_STATE_AUTO);
+			rc = mwl_fwcmd_set_apmode(hw, AP_MODE_11AC);
+			if (rc)
+				goto out;
+			rc = mwl_fwcmd_set_linkadapt_cs_mode(hw,
+							   LINK_CS_STATE_AUTO);
 			rate = mwl_rates_50[0].hw_value;
+		} else {
+			rc = -EINVAL;
+			goto out;
 		}
+		if (rc)
+			goto out;
 
 		rc = mwl_fwcmd_set_rf_channel(hw, conf);
 		if (rc)
@@ -391,13 +427,169 @@ static int mwl_mac80211_config(struct ieee80211_hw *hw, int radio_idx,
 			goto out;
 	}
 
-	/* Channel changes can reset detection; configure it after tuning. */
+	/* Publish only after tuning succeeded; firmware helpers use this state. */
+	if (conf->chandef.chan) {
+		priv->radio_conf = *conf;
+		WRITE_ONCE(priv->radio_conf_valid, true);
+	}
 	if (changed & IEEE80211_CONF_CHANGE_CHANNEL)
 		rc = mwl_mac80211_update_radar(hw);
 
 out:
-
+	if (rc) {
+		/* A partially applied channel must not remain transmitting. */
+		mwl_fwcmd_radio_disable(hw);
+		priv->radio_conf_valid = false;
+	}
 	return rc;
+}
+
+static int mwl_mac80211_config(struct ieee80211_hw *hw, int radio_idx,
+			       u32 changed)
+{
+	struct mwl_priv *priv = hw->priv;
+	struct ieee80211_conf conf = hw->conf;
+
+	if (priv->csa_faulted && !(conf.flags & IEEE80211_CONF_IDLE))
+		return -EIO;
+	if (priv->csa_state != MWL_CSA_IDLE &&
+	    (conf.flags & IEEE80211_CONF_OFFCHANNEL))
+		return -EBUSY;
+	/* config() still controls software-scan/off-channel excursions. */
+	if (priv->chanctx && !(conf.flags & IEEE80211_CONF_OFFCHANNEL)) {
+		conf.chandef = priv->chanctx->def;
+		conf.radar_enabled = priv->chanctx->radar_enabled;
+		if (priv->csa_state == MWL_CSA_COMPLETING && priv->csa_old_ctx) {
+			conf.chandef = priv->csa_request.chandef;
+			conf.radar_enabled = cfg80211_chandef_dfs_required(hw->wiphy,
+				&conf.chandef, NL80211_IFTYPE_AP) > 0;
+		}
+	} else {
+		conf.radar_enabled = false;
+	}
+	return mwl_configure_radio(hw, &conf, changed);
+}
+
+static int mwl_apply_chanctx(struct ieee80211_hw *hw,
+			     struct ieee80211_chanctx_conf *ctx)
+{
+	struct ieee80211_conf conf = hw->conf;
+
+	conf.chandef = ctx->def;
+	conf.radar_enabled = ctx->radar_enabled;
+	conf.flags &= ~(IEEE80211_CONF_IDLE | IEEE80211_CONF_OFFCHANNEL);
+	return mwl_configure_radio(hw, &conf, IEEE80211_CONF_CHANGE_CHANNEL);
+}
+
+static int mwl_mac80211_add_chanctx(struct ieee80211_hw *hw,
+				  struct ieee80211_chanctx_conf *ctx)
+{
+	struct mwl_priv *priv = hw->priv;
+	int ret;
+
+	/* One hardware channel; multiple VIFs may share this context. */
+	if (priv->csa_faulted)
+		return -EIO;
+	if (priv->chanctx)
+		return -EBUSY;
+	priv->dfs_monitoring = false;
+	ret = mwl_apply_chanctx(hw, ctx);
+	if (!ret)
+		priv->chanctx = ctx;
+	return ret;
+}
+
+static void mwl_mac80211_remove_chanctx(struct ieee80211_hw *hw,
+				      struct ieee80211_chanctx_conf *ctx)
+{
+	struct mwl_priv *priv = hw->priv;
+
+	if (WARN_ON(priv->chanctx != ctx))
+		return;
+	mwl_csa_reset(hw);
+	mwl_fwcmd_set_radar_detect(hw, STOP_DETECT_RADAR);
+	mwl_fwcmd_radio_disable(hw);
+	priv->chanctx = NULL;
+	priv->radio_conf_valid = false;
+	priv->dfs_monitoring = false;
+}
+
+static void mwl_mac80211_change_chanctx(struct ieee80211_hw *hw,
+				      struct ieee80211_chanctx_conf *ctx,
+				      u32 changed)
+{
+	struct mwl_priv *priv = hw->priv;
+	int ret;
+
+	if (WARN_ON(priv->chanctx != ctx) || priv->csa_faulted)
+		return;
+	if ((priv->csa_state == MWL_CSA_PENDING ||
+	     priv->csa_state == MWL_CSA_COMPLETING) &&
+	    (changed & (IEEE80211_CHANCTX_CHANGE_CHANNEL |
+			IEEE80211_CHANCTX_CHANGE_WIDTH))) {
+		if (!cfg80211_chandef_identical(&ctx->def, &priv->radio_conf.chandef)) {
+			mwl_csa_fail(hw, "uncoordinated channel change during CSA");
+			return;
+		}
+		/* Do not retune a channel already selected by firmware. */
+		changed &= ~(IEEE80211_CHANCTX_CHANGE_CHANNEL |
+			     IEEE80211_CHANCTX_CHANGE_WIDTH);
+	}
+	if (changed & (IEEE80211_CHANCTX_CHANGE_CHANNEL |
+		       IEEE80211_CHANCTX_CHANGE_WIDTH)) {
+		priv->dfs_monitoring = false;
+		ret = mwl_apply_chanctx(hw, ctx);
+	} else if (changed & IEEE80211_CHANCTX_CHANGE_RADAR) {
+		priv->radio_conf.radar_enabled = ctx->radar_enabled;
+		if (!ctx->radar_enabled)
+			priv->dfs_monitoring = false;
+		ret = mwl_mac80211_update_radar(hw);
+	} else {
+		return;
+	}
+	if (ret) {
+		wiphy_err(hw->wiphy, "channel context update failed: %d\n", ret);
+		if (priv->csa_state != MWL_CSA_IDLE) {
+			mwl_csa_fail(hw, "channel update during CSA failed");
+			return;
+		}
+		mwl_fwcmd_radio_disable(hw);
+		ieee80211_restart_hw(hw);
+	}
+}
+
+static int mwl_mac80211_assign_vif_chanctx(struct ieee80211_hw *hw,
+					 struct ieee80211_vif *vif,
+					 struct ieee80211_bss_conf *link_conf,
+					 struct ieee80211_chanctx_conf *ctx)
+{
+	struct mwl_priv *priv = hw->priv;
+
+	if (link_conf->link_id)
+		return -EOPNOTSUPP;
+	if (priv->csa_state != MWL_CSA_IDLE)
+		return -EBUSY;
+	if (!priv->radio_conf_valid)
+		return -EIO;
+	if (priv->chanctx != ctx)
+		return -EINVAL;
+	mwl_dev_get_vif(vif)->chanctx = ctx;
+	return 0;
+}
+
+static void mwl_mac80211_unassign_vif_chanctx(struct ieee80211_hw *hw,
+					    struct ieee80211_vif *vif,
+					    struct ieee80211_bss_conf *link_conf,
+					    struct ieee80211_chanctx_conf *ctx)
+{
+	struct mwl_priv *priv = hw->priv;
+	struct mwl_vif *mwl_vif = mwl_dev_get_vif(vif);
+
+	if (priv->csa_state != MWL_CSA_IDLE &&
+	    priv->csa_state != MWL_CSA_RECOVERING &&
+	    (priv->csa_expected & BIT(mwl_vif->macid)))
+		mwl_csa_fail(hw, "participating interface unassigned");
+	mwl_vif->chanctx = NULL;
 }
 
 static void mwl_mac80211_bss_info_changed_sta(struct ieee80211_hw *hw,
@@ -470,7 +662,7 @@ static void mwl_mac80211_bss_info_changed_ap(struct ieee80211_hw *hw,
 		if (idx)
 			idx--;
 		if (mwl_vif->basic_rate_idx != idx) {
-			if (hw->conf.chandef.chan->band == NL80211_BAND_2GHZ)
+			if (mwl_radio_conf(hw)->chandef.chan->band == NL80211_BAND_2GHZ)
 				rate = mwl_rates_24[idx].hw_value;
 			else
 				rate = mwl_rates_50[idx].hw_value;
@@ -497,22 +689,40 @@ static void mwl_mac80211_bss_info_changed_ap(struct ieee80211_hw *hw,
 			}
 		}
 
-		if (!mwl_vif->set_beacon) {
+		if (!mwl_vif->set_beacon || (changed & BSS_CHANGED_BEACON)) {
 			skb = ieee80211_beacon_get(hw, vif, 0);
 
 			if (skb) {
-				mwl_fwcmd_set_beacon(hw, vif, skb->data, skb->len);
+				int ret = mwl_fwcmd_set_beacon(hw, vif, skb->data, skb->len);
+
 				dev_kfree_skb_any(skb);
+				if (ret) {
+					wiphy_err(hw->wiphy, "beacon upload failed: %d\n", ret);
+					mwl_csa_fail(hw, "CSA/after-CSA beacon upload failed");
+					return;
+				}
+				mwl_vif->set_beacon = true;
+			} else if (priv->csa_state != MWL_CSA_IDLE) {
+				mwl_csa_fail(hw, "CSA/after-CSA beacon unavailable");
+				return;
 			}
-			mwl_vif->set_beacon = true;
 		}
 	}
 
 	if (changed & BSS_CHANGED_BEACON_ENABLED) {
 		int ret;
 
+		if (info->enable_beacon && priv->csa_faulted)
+			return;
+		if (!info->enable_beacon && priv->csa_state != MWL_CSA_IDLE &&
+		    priv->csa_state != MWL_CSA_RECOVERING &&
+		    (priv->csa_expected & BIT(mwl_vif->macid))) {
+			mwl_csa_fail(hw, "participating AP stopped beaconing");
+			return;
+		}
+
 		/* Enter in-service monitoring before enabling DFS beacons. */
-		if (info->enable_beacon && hw->conf.radar_enabled) {
+		if (info->enable_beacon && mwl_radio_conf(hw)->radar_enabled) {
 			ret = mwl_mac80211_update_radar(hw);
 			if (ret)
 				return;
@@ -523,7 +733,7 @@ static void mwl_mac80211_bss_info_changed_ap(struct ieee80211_hw *hw,
 				  ret);
 			return;
 		}
-		if (!info->enable_beacon && hw->conf.radar_enabled)
+		if (!info->enable_beacon && mwl_radio_conf(hw)->radar_enabled)
 			mwl_mac80211_update_radar(hw);
 	}
 }
@@ -674,7 +884,7 @@ static int mwl_mac80211_sta_add(struct ieee80211_hw *hw,
 	sta_info->stnid = stnid;
 	if (vif->type == NL80211_IFTYPE_STATION)
 		sta_info->sta_stnid = sta_stnid;
-	sta_info->tx_rate_info = utils_get_init_tx_rate(priv, &hw->conf, sta);
+	sta_info->tx_rate_info = utils_get_init_tx_rate(priv, mwl_radio_conf(hw), sta);
 	spin_lock_init(&sta_info->amsdu_lock);
 	spin_lock_bh(&priv->sta_lock);
 	list_add_tail(&sta_info->list, &priv->sta_list);
@@ -783,6 +993,8 @@ static int mwl_mac80211_get_survey(struct ieee80211_hw *hw,
 	struct mwl_priv *priv = hw->priv;
 	struct mwl_survey_info *survey_info;
 
+	if (!mwl_radio_conf(hw)->chandef.chan)
+		return -ENOENT;
 	if (priv->survey_info_idx) {
 		if (idx >= priv->survey_info_idx) {
 			priv->survey_info_idx = 0;
@@ -794,7 +1006,7 @@ static int mwl_mac80211_get_survey(struct ieee80211_hw *hw,
 			return -ENOENT;
 		mwl_fwcmd_get_survey(hw, 0);
 		survey_info = &priv->cur_survey_info;
-		if (!(hw->conf.flags & IEEE80211_CONF_OFFCHANNEL))
+		if (!(mwl_radio_conf(hw)->flags & IEEE80211_CONF_OFFCHANNEL))
 			survey->filled |= SURVEY_INFO_IN_USE;
 	}
 
@@ -958,15 +1170,440 @@ static int mwl_mac80211_ampdu_action(struct ieee80211_hw *hw,
 	return rc;
 }
 
+/* All CSA state except IRQ event tagging is protected by the wiphy lock. */
+static void mwl_csa_reset(struct ieee80211_hw *hw)
+{
+	struct mwl_priv *priv = hw->priv;
+
+	cancel_delayed_work(&priv->csa_timeout_work);
+	WRITE_ONCE(priv->csa_state, MWL_CSA_IDLE);
+	WRITE_ONCE(priv->csa_active, false);
+	WRITE_ONCE(priv->csa_generation, priv->csa_generation + 1);
+	priv->csa_old_ctx = NULL;
+	priv->csa_expected = 0;
+	priv->csa_prepared = 0;
+	priv->csa_ready = 0;
+	priv->csa_posted = 0;
+	priv->csa_bss_stopped = 0;
+}
+
+static void mwl_csa_arm_timeout(struct mwl_priv *priv, unsigned long delay)
+{
+	priv->csa_deadline = jiffies + delay;
+	mod_delayed_work(system_wq, &priv->csa_timeout_work, delay);
+}
+
+static void mwl_csa_fail(struct ieee80211_hw *hw, const char *reason)
+{
+	struct mwl_priv *priv = hw->priv;
+	struct mwl_vif *mv;
+	int ret;
+
+	if (priv->csa_state == MWL_CSA_IDLE ||
+	    priv->csa_state == MWL_CSA_RECOVERING)
+		return;
+	wiphy_err(hw->wiphy, "CSA failed: %s; stopping radio/interfaces\n", reason);
+	WRITE_ONCE(priv->csa_state, MWL_CSA_RECOVERING);
+	priv->csa_faulted = true;
+	WRITE_ONCE(priv->csa_active, false);
+	WRITE_ONCE(priv->csa_generation, priv->csa_generation + 1);
+	cancel_delayed_work(&priv->csa_timeout_work);
+	ieee80211_stop_queues(hw);
+	/* Never recover by resuming an old channel that may be in NOP. */
+	list_for_each_entry(mv, &priv->vif_list, list) {
+		struct ieee80211_vif *vif =
+			container_of((void *)mv, struct ieee80211_vif, drv_priv);
+
+		if (!mv->chanctx)
+			continue;
+		ret = mwl_fwcmd_bss_start(hw, vif, false);
+		if (ret)
+			wiphy_err(hw->wiphy, "CSA recovery BSS stop failed: %d\n", ret);
+		mv->set_beacon = false;
+		cfg80211_stop_iface(hw->wiphy, ieee80211_vif_to_wdev(vif),
+				    GFP_KERNEL);
+	}
+	ret = mwl_fwcmd_radio_disable(hw);
+	if (ret)
+		wiphy_err(hw->wiphy, "CSA recovery radio stop failed: %d\n", ret);
+	WRITE_ONCE(priv->radio_conf_valid, false);
+	priv->dfs_monitoring = false;
+}
+
+void mwl_csa_timeout(struct work_struct *work)
+{
+	struct mwl_priv *priv = container_of(to_delayed_work(work),
+					   struct mwl_priv, csa_timeout_work);
+
+	wiphy_lock(priv->hw->wiphy);
+	if (priv->csa_state != MWL_CSA_IDLE &&
+	    priv->csa_state != MWL_CSA_RECOVERING) {
+		/* A cancelled/running timeout must not expire a newer request. */
+		if (time_before(jiffies, priv->csa_deadline))
+			mod_delayed_work(system_wq, &priv->csa_timeout_work,
+					 priv->csa_deadline - jiffies);
+		else
+			mwl_csa_fail(priv->hw, "preparation/firmware/finalization timeout");
+	}
+	wiphy_unlock(priv->hw->wiphy);
+}
+
+void mwl_queue_csa_event(struct ieee80211_hw *hw)
+{
+	struct mwl_priv *priv = hw->priv;
+
+	if (READ_ONCE(priv->csa_state) != MWL_CSA_PENDING)
+		return;
+	WRITE_ONCE(priv->csa_event_generation, READ_ONCE(priv->csa_generation));
+	ieee80211_queue_work(hw, &priv->chnl_switch_handle);
+}
+
+static int mwl_csa_target_allowed(struct ieee80211_hw *hw,
+				const struct cfg80211_chan_def *target)
+{
+	struct mwl_priv *priv = hw->priv;
+	struct ieee80211_channel *old = mwl_radio_conf(hw)->chandef.chan;
+	int radar;
+
+	if (!target->chan || !old || !cfg80211_chandef_valid(target) ||
+	    target->chan->band != old->band || target->chan->freq_offset ||
+	    target->punctured)
+		return -EINVAL;
+	switch (target->width) {
+	case NL80211_CHAN_WIDTH_20_NOHT:
+	case NL80211_CHAN_WIDTH_20:
+	case NL80211_CHAN_WIDTH_40:
+	case NL80211_CHAN_WIDTH_80:
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+	/* Strict check includes all subchannels and DFS availability. */
+	if (!cfg80211_reg_can_beacon(hw->wiphy, (struct cfg80211_chan_def *)target,
+				    NL80211_IFTYPE_AP))
+		return -EPERM;
+	radar = cfg80211_chandef_dfs_required(hw->wiphy, target,
+					    NL80211_IFTYPE_AP);
+	if (radar < 0)
+		return radar;
+	if (!radar)
+		return 0;
+	/* CSA does not perform CAC. Keep an already-running detector across
+	 * DFS-to-DFS switches; never enable target beacons needing new CAC.
+	 */
+	if (cfg80211_chandef_dfs_usable(hw->wiphy, target))
+		return -EPERM;
+	if (!priv->radio_conf.radar_enabled || !priv->dfs_monitoring)
+		return -EOPNOTSUPP;
+	/* Japan uses distinct profiles in channels 52-64 and 100-140. */
+	if (priv->dfs_region == NL80211_DFS_JP &&
+	    ((old->hw_value <= 64) != (target->chan->hw_value <= 64)))
+		return -EOPNOTSUPP;
+	return 0;
+}
+
 static int mwl_mac80211_chnl_switch(struct ieee80211_hw *hw,
 				    struct ieee80211_vif *vif,
-				    struct ieee80211_channel_switch *ch_switch)
+				    struct ieee80211_channel_switch *request)
 {
-	int rc = 0;
+	struct mwl_priv *priv = hw->priv;
+	struct mwl_vif *mv = mwl_dev_get_vif(vif), *iter;
+	u32 expected = 0, bit = BIT(mv->macid);
+	u64 timeout_ms;
+	int ret;
 
-	rc = mwl_fwcmd_set_switch_channel(hw, ch_switch);
+	if (vif->type != NL80211_IFTYPE_AP || !vif->bss_conf.beacon_int ||
+	    request->link_id ||
+	    !priv->chanctx || mv->chanctx != priv->chanctx ||
+	    !priv->radio_conf_valid || priv->sw_scanning)
+		return -EOPNOTSUPP;
+	if (priv->csa_state != MWL_CSA_IDLE &&
+	    priv->csa_state != MWL_CSA_PREPARED)
+		return -EBUSY;
+	ret = mwl_csa_target_allowed(hw, &request->chandef);
+	if (ret)
+		return ret;
+	/* Firmware countdown may resume beacons before its interrupt. Until
+	 * detector persistence across that retune is verified, use only a
+	 * non-DFS target. Immediate switches stop BSSes and can configure
+	 * detection before restarting them on an already-available target.
+	 */
+	if (request->count > 1 &&
+	    cfg80211_chandef_dfs_required(hw->wiphy, &request->chandef,
+					 NL80211_IFTYPE_AP) > 0)
+		return -EOPNOTSUPP;
+	if (cfg80211_chandef_identical(&priv->radio_conf.chandef,
+					 &request->chandef))
+		return -EINVAL;
+	list_for_each_entry(iter, &priv->vif_list, list) {
+		struct ieee80211_vif *ivif =
+			container_of((void *)iter, struct ieee80211_vif, drv_priv);
 
-	return rc;
+		if (!iter->chanctx)
+			continue;
+		/* Every user of this physical channel must participate. */
+		if (iter->chanctx != priv->chanctx ||
+		    ivif->type != NL80211_IFTYPE_AP ||
+		    !ivif->bss_conf.enable_beacon ||
+		    ivif->bss_conf.beacon_int != vif->bss_conf.beacon_int)
+			return -EBUSY;
+		expected |= BIT(iter->macid);
+	}
+	if (!(expected & bit) || (!is_power_of_2(expected) && request->count <= 1))
+		return -EOPNOTSUPP;
+	timeout_ms = div_u64(((u64)request->count + 2) *
+			     vif->bss_conf.beacon_int * 1024, 1000) + 3000;
+	if (timeout_ms > 60000)
+		return -EINVAL;
+	if (priv->csa_state == MWL_CSA_PREPARED) {
+		if (expected != priv->csa_expected ||
+		    !cfg80211_chandef_identical(&request->chandef,
+						 &priv->csa_request.chandef) ||
+		    request->count != priv->csa_request.count ||
+		    request->block_tx != priv->csa_request.block_tx)
+			return -EBUSY;
+	} else {
+		priv->csa_request = *request;
+		priv->csa_old_ctx = priv->chanctx;
+		priv->csa_expected = expected;
+		priv->csa_prepared = 0;
+		priv->csa_ready = 0;
+		priv->csa_posted = 0;
+		priv->csa_bss_stopped = 0;
+		priv->csa_timeout_jiffies = msecs_to_jiffies(timeout_ms);
+		WRITE_ONCE(priv->csa_generation, priv->csa_generation + 1);
+		WRITE_ONCE(priv->csa_state, MWL_CSA_PREPARED);
+		mwl_csa_arm_timeout(priv, msecs_to_jiffies(5000));
+	}
+	priv->csa_prepared |= bit;
+	wiphy_debug(hw->wiphy, "CSA prepare gen %u vif %pM target %u count %u block %u mask %x/%x\n",
+		   priv->csa_generation, vif->addr,
+		   request->chandef.chan->center_freq, request->count,
+		   request->block_tx, priv->csa_prepared, expected);
+	return 0;
+}
+
+static void mwl_mac80211_channel_switch_beacon(struct ieee80211_hw *hw,
+					     struct ieee80211_vif *vif,
+					     struct cfg80211_chan_def *target)
+{
+	struct mwl_priv *priv = hw->priv;
+	u32 bit = BIT(mwl_dev_get_vif(vif)->macid);
+	int ret;
+
+	if (priv->csa_state != MWL_CSA_PREPARED ||
+	    !(priv->csa_prepared & bit) ||
+	    !cfg80211_chandef_identical(target, &priv->csa_request.chandef)) {
+		mwl_csa_fail(hw, "unexpected CSA beacon callback");
+		return;
+	}
+	priv->csa_ready |= bit;
+	if (priv->csa_ready != priv->csa_expected)
+		return;
+	ret = mwl_csa_target_allowed(hw, target);
+	if (ret) {
+		mwl_csa_fail(hw, "target no longer available");
+		return;
+	}
+	/* Reservation and CSA beacons now exist for every participating VIF.
+	 * Publish pending before submission: a completion can interrupt it.
+	 */
+	WRITE_ONCE(priv->csa_state, MWL_CSA_PENDING);
+	WRITE_ONCE(priv->csa_active, true);
+	mwl_csa_arm_timeout(priv, priv->csa_timeout_jiffies);
+	ret = mwl_fwcmd_set_switch_channel(hw, &priv->csa_request);
+	if (ret)
+		mwl_csa_fail(hw, "firmware switch command rejected");
+	else
+		wiphy_debug(hw->wiphy, "CSA submitted gen %u target %u\n",
+			   priv->csa_generation, target->chan->center_freq);
+}
+
+void mwl_csa_event(struct ieee80211_hw *hw)
+{
+	struct mwl_priv *priv = hw->priv;
+	struct mwl_vif *mv;
+
+	if (priv->csa_state != MWL_CSA_PENDING ||
+	    READ_ONCE(priv->csa_event_generation) != priv->csa_generation) {
+		wiphy_debug(hw->wiphy, "ignoring stale/duplicate CSA completion\n");
+		return;
+	}
+	if (mwl_csa_target_allowed(hw, &priv->csa_request.chandef)) {
+		mwl_csa_fail(hw, "target invalid at firmware completion");
+		return;
+	}
+	WRITE_ONCE(priv->csa_state, MWL_CSA_COMPLETING);
+	ieee80211_stop_queues(hw);
+	/* Firmware has already tuned. Publish RX/TX channel before notifying
+	 * mac80211; switch_vif_chanctx must not issue a second RF switch.
+	 */
+	priv->radio_conf.chandef = priv->csa_request.chandef;
+	mwl_csa_arm_timeout(priv, msecs_to_jiffies(5000));
+	list_for_each_entry(mv, &priv->vif_list, list) {
+		struct ieee80211_vif *vif =
+			container_of((void *)mv, struct ieee80211_vif, drv_priv);
+
+		if (!(priv->csa_expected & BIT(mv->macid)))
+			continue;
+		if (mv->chanctx != priv->csa_old_ctx || !vif->bss_conf.csa_active) {
+			mwl_csa_fail(hw, "completion without participating interface");
+			return;
+		}
+	}
+	list_for_each_entry(mv, &priv->vif_list, list) {
+		struct ieee80211_vif *vif =
+			container_of((void *)mv, struct ieee80211_vif, drv_priv);
+
+		if (priv->csa_expected & BIT(mv->macid)) {
+			mv->set_beacon = false;
+			ieee80211_csa_finish(vif, 0);
+		}
+	}
+	wiphy_debug(hw->wiphy, "CSA firmware completion gen %u\n",
+		   priv->csa_generation);
+}
+
+static int mwl_mac80211_switch_vif_chanctx(struct ieee80211_hw *hw,
+				struct ieee80211_vif_chanctx_switch *vifs,
+				int n_vifs, enum ieee80211_chanctx_switch_mode mode)
+{
+	struct mwl_priv *priv = hw->priv;
+	struct ieee80211_chanctx_conf *target;
+	u32 mask = 0;
+	int i, ret;
+	bool firmware_done = priv->csa_state == MWL_CSA_COMPLETING;
+
+	if (mode != CHANCTX_SWMODE_SWAP_CONTEXTS) {
+		if (firmware_done)
+			mwl_csa_fail(hw, "unsupported replacement mode after switch");
+		return -EOPNOTSUPP;
+	}
+	if (n_vifs <= 0 || (priv->csa_state != MWL_CSA_PREPARED && !firmware_done)) {
+		if (firmware_done)
+			mwl_csa_fail(hw, "invalid completion replacement list");
+		return -EINVAL;
+	}
+	if (!firmware_done && priv->csa_request.count > 1) {
+		mwl_csa_fail(hw, "context replacement before firmware completion");
+		return -EBUSY;
+	}
+	target = vifs[0].new_ctx;
+	if (!target || priv->chanctx != priv->csa_old_ctx ||
+	    !cfg80211_chandef_identical(&target->def, &priv->csa_request.chandef)) {
+		ret = -EINVAL;
+		goto fail;
+	}
+	for (i = 0; i < n_vifs; i++) {
+		struct mwl_vif *mv = mwl_dev_get_vif(vifs[i].vif);
+		u32 bit = BIT(mv->macid);
+
+		if (!vifs[i].link_conf || vifs[i].link_conf->link_id ||
+		    vifs[i].old_ctx != priv->chanctx || vifs[i].new_ctx != target ||
+		    mv->chanctx != priv->chanctx || (mask & bit)) {
+			ret = -EINVAL;
+			goto fail;
+		}
+		mask |= bit;
+	}
+	if (mask != priv->csa_expected || mask != priv->csa_prepared) {
+		ret = -EBUSY;
+		goto fail;
+	}
+	ret = mwl_csa_target_allowed(hw, &target->def);
+	if (ret)
+		goto fail;
+	ret = cfg80211_chandef_dfs_required(hw->wiphy, &target->def,
+					  NL80211_IFTYPE_AP);
+	if (ret < 0 || !!ret != target->radar_enabled) {
+		ret = -EINVAL;
+		goto fail;
+	}
+	ieee80211_stop_queues(hw);
+	if (!firmware_done) {
+		/* Count <= 1 has no CSA beacon callback in mac80211. Stop BSS
+		 * transmission for the immediate software-controlled retune.
+		 */
+		for (i = 0; i < n_vifs; i++) {
+			ret = mwl_fwcmd_bss_start(hw, vifs[i].vif, false);
+			if (ret)
+				goto fail;
+			priv->csa_bss_stopped |= BIT(mwl_dev_get_vif(vifs[i].vif)->macid);
+		}
+		ret = mwl_apply_chanctx(hw, target);
+	} else {
+		/* Firmware has tuned; only apply target power and detection. */
+		priv->radio_conf.chandef = target->def;
+		priv->radio_conf.radar_enabled = target->radar_enabled;
+		ret = mwl_fwcmd_max_tx_power(hw, &priv->radio_conf, 0);
+		if (!ret)
+			ret = mwl_fwcmd_tx_power(hw, &priv->radio_conf, 0);
+		if (!ret)
+			ret = mwl_mac80211_update_radar(hw);
+	}
+	if (ret)
+		goto fail;
+	if (!target->radar_enabled)
+		priv->dfs_monitoring = false;
+	priv->chanctx = target;
+	for (i = 0; i < n_vifs; i++)
+		mwl_dev_get_vif(vifs[i].vif)->chanctx = target;
+	/* Old context ceases to exist when this callback succeeds. */
+	priv->csa_old_ctx = NULL;
+	WRITE_ONCE(priv->csa_state, MWL_CSA_COMPLETING);
+	mwl_csa_arm_timeout(priv, msecs_to_jiffies(5000));
+	wiphy_debug(hw->wiphy, "CSA context committed gen %u target %u\n",
+		   priv->csa_generation, target->def.chan->center_freq);
+	return 0;
+fail:
+	mwl_csa_fail(hw, "context switch configuration failed");
+	return ret;
+}
+
+static int mwl_mac80211_post_channel_switch(struct ieee80211_hw *hw,
+					  struct ieee80211_vif *vif,
+					  struct ieee80211_bss_conf *link_conf)
+{
+	struct mwl_priv *priv = hw->priv;
+	u32 bit = BIT(mwl_dev_get_vif(vif)->macid);
+	int ret;
+
+	if (priv->csa_state != MWL_CSA_COMPLETING ||
+	    !(priv->csa_expected & bit) || link_conf->link_id ||
+	    mwl_dev_get_vif(vif)->chanctx != priv->chanctx ||
+	    !cfg80211_chandef_identical(&priv->radio_conf.chandef,
+					 &priv->csa_request.chandef)) {
+		mwl_csa_fail(hw, "unexpected post-switch callback");
+		return -EINVAL;
+	}
+	ret = mwl_csa_target_allowed(hw, &priv->radio_conf.chandef);
+	if (ret)
+		goto fail;
+	if (priv->csa_bss_stopped & bit) {
+		ret = mwl_fwcmd_bss_start(hw, vif, true);
+		if (ret)
+			goto fail;
+	}
+	priv->csa_posted |= bit;
+	if (priv->csa_posted == priv->csa_expected) {
+		wiphy_debug(hw->wiphy, "CSA finished gen %u\n", priv->csa_generation);
+		mwl_csa_reset(hw);
+		ieee80211_wake_queues(hw);
+	}
+	return 0;
+fail:
+	mwl_csa_fail(hw, "post-switch target/BSS validation failed");
+	return ret;
+}
+
+static void mwl_mac80211_abort_channel_switch(struct ieee80211_hw *hw,
+					    struct ieee80211_vif *vif,
+					    struct ieee80211_bss_conf *link_conf)
+{
+	struct mwl_priv *priv = hw->priv;
+
+	if (priv->csa_expected & BIT(mwl_dev_get_vif(vif)->macid))
+		mwl_csa_fail(hw, "channel switch aborted");
 }
 
 static void mwl_mac80211_sw_scan_start(struct ieee80211_hw *hw,
@@ -1005,11 +1642,16 @@ const struct ieee80211_ops mwl_mac80211_ops = {
 	.get_survey         = mwl_mac80211_get_survey,
 	.ampdu_action       = mwl_mac80211_ampdu_action,
 	.pre_channel_switch = mwl_mac80211_chnl_switch,
+	.channel_switch_beacon = mwl_mac80211_channel_switch_beacon,
+	.post_channel_switch = mwl_mac80211_post_channel_switch,
+	.abort_channel_switch = mwl_mac80211_abort_channel_switch,
 	.sw_scan_start      = mwl_mac80211_sw_scan_start,
 	.sw_scan_complete   = mwl_mac80211_sw_scan_complete,
 	.wake_tx_queue	    = ieee80211_handle_wake_tx_queue,
-	.add_chanctx        = ieee80211_emulate_add_chanctx,
-	.remove_chanctx     = ieee80211_emulate_remove_chanctx,
-	.change_chanctx     = ieee80211_emulate_change_chanctx,
-	.switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx,
+	.add_chanctx        = mwl_mac80211_add_chanctx,
+	.remove_chanctx     = mwl_mac80211_remove_chanctx,
+	.change_chanctx     = mwl_mac80211_change_chanctx,
+	.assign_vif_chanctx = mwl_mac80211_assign_vif_chanctx,
+	.unassign_vif_chanctx = mwl_mac80211_unassign_vif_chanctx,
+	.switch_vif_chanctx = mwl_mac80211_switch_vif_chanctx,
 };

@@ -848,7 +848,8 @@ static inline void pcie_tx_prepare_info(struct mwl_priv *priv, u32 rate,
 
 		info->status.rates[0].idx = rate_id;
 		if (format == TX_RATE_FORMAT_LEGACY) {
-			if (priv->hw->conf.chandef.chan->hw_value >
+			if (mwl_radio_conf(priv->hw)->chandef.chan &&
+			    mwl_radio_conf(priv->hw)->chandef.chan->hw_value >
 			    BAND_24_CHANNEL_NUM) {
 				info->status.rates[0].idx -= 5;
 			}
@@ -956,7 +957,7 @@ static inline void pcie_rx_prepare_status(struct mwl_priv *priv, u16 format,
 #endif
 	status->rate_idx = rate;
 
-	if (priv->hw->conf.chandef.chan->hw_value >
+	if (mwl_radio_conf(priv->hw)->chandef.chan->hw_value >
 	    BAND_24_CHANNEL_NUM) {
 		status->band = NL80211_BAND_5GHZ;
 #ifdef RX_ENC_FLAG_STBC_SHIFT
