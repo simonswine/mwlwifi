@@ -388,6 +388,7 @@ struct mwl_priv {
 	bool dwds_stamode;
 	bool optimization_level;
 	u32 feature;
+	u32 amsdu_hold_us;
 };
 
 struct beacon_info {
@@ -450,6 +451,7 @@ struct mwl_tx_info {
 
 struct mwl_amsdu_frag {
 	struct sk_buff *skb;
+	ktime_t timestamp;
 	u8 pad;
 	u8 num;
 };

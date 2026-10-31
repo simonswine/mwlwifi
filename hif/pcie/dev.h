@@ -582,6 +582,7 @@ struct pcie_priv {
 	spinlock_t int_mask_lock ____cacheline_aligned_in_smp;
 	struct tasklet_struct tx_task;
 	struct tasklet_struct tx_done_task;
+	struct hrtimer amsdu_timer;
 	/* NAPI */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6,14,0)
 	struct net_device napi_dev;

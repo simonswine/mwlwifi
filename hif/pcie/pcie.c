@@ -47,6 +47,7 @@ static bool dwds_stamode = true;
 static bool optimization_level = true;
 static bool dump_hostcmd = false;
 static unsigned int feature = 0x0;
+static unsigned int amsdu_hold_us = 500;
 
 static struct pci_device_id pcie_id_tbl[] = {
 	{ PCI_VDEVICE(MARVELL, 0x2a55),     .driver_data = MWL8864, },
@@ -439,6 +440,8 @@ static void pcie_deinit_8864(struct ieee80211_hw *hw)
 	struct mwl_priv *priv = hw->priv;
 	struct pcie_priv *pcie_priv = priv->hif.priv;
 
+	hrtimer_cancel(&pcie_priv->amsdu_timer);
+
 	/* kill the data tasklets first, while all DMA resources are still
 	 * valid, so a drained run cannot touch freed memory
 	 */
@@ -507,6 +510,7 @@ static void pcie_disable_data_tasks(struct ieee80211_hw *hw)
 	struct mwl_priv *priv = hw->priv;
 	struct pcie_priv *pcie_priv = priv->hif.priv;
 
+	hrtimer_cancel(&pcie_priv->amsdu_timer);
 	tasklet_disable(&pcie_priv->tx_task);
 	tasklet_disable(&pcie_priv->tx_done_task);
 	napi_synchronize(&pcie_priv->napi);
@@ -1780,9 +1784,11 @@ static int pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	priv->optimization_level = optimization_level;
 	priv->dump_hostcmd = dump_hostcmd;
 	priv->feature = feature;
+	priv->amsdu_hold_us = amsdu_hold_us;
 
 	pr_info("rate_adapt_mode: %d, dwds_stamode: %d, optimization_level: %d, dump_hostcmd: %d, feature: %x\n",
 			rate_adapt_mode, dwds_stamode, optimization_level, dump_hostcmd, feature);
+	pr_info("amsdu_hold_us: %u\n", priv->amsdu_hold_us);
 
 	pcie_priv->pdev = pdev;
 	if (id->driver_data != MWL8964) {
@@ -1861,6 +1867,8 @@ module_param(dump_hostcmd, bool, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 MODULE_PARM_DESC(dump_hostcmd, "dump_hostcmd");
 module_param(feature, uint, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 MODULE_PARM_DESC(feature, "set feature hw");
+module_param(amsdu_hold_us, uint, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+MODULE_PARM_DESC(amsdu_hold_us, "hold partial A-MSDUs up to N us before flushing (default 500, 0 = eager flush)");
 
 module_pci_driver(mwl_pcie_driver);
 
